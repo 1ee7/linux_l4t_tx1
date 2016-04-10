@@ -24,6 +24,7 @@
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/hrtimer.h>
 #include <soc/tegra/tegra_bpmp.h>
 #include "../../../arch/arm/mach-tegra/iomap.h"
 #include "bpmp.h"
