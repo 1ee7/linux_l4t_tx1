@@ -119,7 +119,6 @@ int tegra_smmu_of_register_asprops(struct device *dev,
 
 		err = of_property_read_u64(np, "iova-start", &prop->iova_start);
 		err |= of_property_read_u64(np, "iova-size", &prop->iova_size);
-		err |= of_property_read_u32(np, "alignment", &prop->alignment);
 		err |= of_property_read_u32(np, "num-pf-page",
 					    &prop->num_pf_page);
 		err |= of_property_read_u32(np, "gap-page", &prop->gap_page);
@@ -129,6 +128,9 @@ int tegra_smmu_of_register_asprops(struct device *dev,
 				np->name);
 			goto free_mem;
 		}
+		err = of_property_read_u32(np, "alignment", &prop->alignment);
+		if (err)
+			prop->alignment = 0;
 
 		count++;
 		list_add_tail(&prop->list, asprops);
@@ -163,8 +165,11 @@ u64 tegra_smmu_of_get_swgids(struct device *dev,
 	struct of_phandle_iter iter;
 	u64 fixup, swgids = 0;
 
-	if (dev_is_pci(dev))
+	if (dev_is_pci(dev)) {
 		return SWGIDS_ERROR_CODE;
+		swgids = TEGRA_SWGROUP_BIT(AFI);
+		goto try_fixup;
+	}
 
 	of_property_for_each_phandle_with_args(iter, dev->of_node, "iommus",
 					       "#iommu-cells", 0) {
@@ -184,6 +189,7 @@ u64 tegra_smmu_of_get_swgids(struct device *dev,
 
 	swgids = swgids ? swgids : SWGIDS_ERROR_CODE;
 
+try_fixup:
 	fixup = tegra_smmu_fixup_swgids(dev, area);
 
 	if (swgids_is_error(fixup))

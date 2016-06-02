@@ -70,7 +70,7 @@ static const int MIN_LOW_TEMP = -127000;
 /*
  * default 'max' value of the HW PLLX offsetting feature
  */
-#define PLLX_OFFSET_MAX			10
+#define PLLX_OFFSET_MAX			10000
 
 #define CTL_LVL0_CPU0			0x0
 #define CTL_LVL0_CPU0_STATUS_MASK	0x3
@@ -280,13 +280,14 @@ static const int MIN_LOW_TEMP = -127000;
 #define TH_TS_EN_HW_PLLX_OFFSET_CPU_SHIFT	0
 #define TH_TS_EN_HW_PLLX_OFFSET_CPU_MASK	1
 
+#define TH_TS_PLLX_OFFSET_MIN		0x1e8
 #define TH_TS_PLLX_OFFSET_MAX		0x1ec
-#define TH_TS_PLLX_MAX_MEM_OFFSET_SHIFT	16
-#define TH_TS_PLLX_MAX_MEM_OFFSET_MASK	0xff
-#define TH_TS_PLLX_MAX_GPU_OFFSET_SHIFT	8
-#define TH_TS_PLLX_MAX_GPU_OFFSET_MASK	0xff
-#define TH_TS_PLLX_MAX_CPU_OFFSET_SHIFT	0
-#define TH_TS_PLLX_MAX_CPU_OFFSET_MASK	0xff
+#define TH_TS_PLLX_MEM_OFFSET_SHIFT	16
+#define TH_TS_PLLX_MEM_OFFSET_MASK	0xff
+#define TH_TS_PLLX_GPU_OFFSET_SHIFT	8
+#define TH_TS_PLLX_GPU_OFFSET_MASK	0xff
+#define TH_TS_PLLX_CPU_OFFSET_SHIFT	0
+#define TH_TS_PLLX_CPU_OFFSET_MASK	0xff
 
 #define TH_TS_VALID			0x1e0
 #define TH_TS_VALID_GPU_SHIFT		9
@@ -1902,7 +1903,7 @@ static int soctherm_thermal_sys_init(void)
  */
 static irqreturn_t soctherm_thermal_thread_func(int irq, void *arg)
 {
-	u32 st, ex = 0, cp = 0, gp = 0, pl = 0;
+	u32 st, ex = 0, cp = 0, gp = 0, pl = 0, me = 0;
 
 	st = soctherm_readl(TH_INTR_STATUS);
 
@@ -1919,6 +1920,10 @@ static irqreturn_t soctherm_thermal_thread_func(int irq, void *arg)
 	pl |= REG_GET_BIT(st, TH_INTR_POS_PU0);
 	ex |= pl;
 
+	me |= REG_GET_BIT(st, TH_INTR_POS_MD0);
+	me |= REG_GET_BIT(st, TH_INTR_POS_MU0);
+	ex |= me;
+
 	if (ex) {
 		soctherm_writel(ex, TH_INTR_STATUS);
 		st &= ~ex;
@@ -1928,12 +1933,11 @@ static irqreturn_t soctherm_thermal_thread_func(int irq, void *arg)
 			soctherm_update_zone(THERM_GPU);
 		if (pl)
 			soctherm_update_zone(THERM_PLL);
+		if (me)
+			soctherm_update_zone(THERM_MEM);
 	}
 
 	/* deliberately ignore expected interrupts NOT handled in SW */
-	ex |= REG_GET_BIT(st, TH_INTR_POS_MD0);
-	ex |= REG_GET_BIT(st, TH_INTR_POS_MU0);
-
 	ex |= REG_GET_BIT(st, TH_INTR_POS_CD1);
 	ex |= REG_GET_BIT(st, TH_INTR_POS_CU1);
 	ex |= REG_GET_BIT(st, TH_INTR_POS_CD2);
@@ -2497,7 +2501,7 @@ static void soctherm_tsense_program(enum soctherm_sense sensor,
 		return;
 
 	therm = &pp->therm[tz_id];
-	if (!therm->tz) {
+	if (!(therm->tz || therm->zone_enable)) {
 		pr_info("soctherm: skipping sensor %d programming\n", sensor);
 		return;
 	}
@@ -2895,12 +2899,13 @@ static int soctherm_init_platform_data(struct soctherm_platform_data *plat)
 	struct soctherm_therm *therm;
 	int i, j;
 	long rem;
-	u32 r, en_hw_off_reg, hw_off_max_reg;
+	u32 r, en_hw_off_reg, hw_off_max_reg, hw_off_min_reg;
 
 #ifdef CONFIG_THERMAL
 	struct soctherm_sensor_common_params *scp = &pp->sensor_params.scp;
 	int k;
 	long gsh = MAX_HIGH_TEMP;
+	int num_thermal_trip_critical = 0;
 
 	/* program pdiv register */
 	r = soctherm_readl(TS_PDIV);
@@ -2909,16 +2914,6 @@ static int soctherm_init_platform_data(struct soctherm_platform_data *plat)
 	r = REG_SET(r, TS_PDIV_MEM, scp->pdiv);
 	r = REG_SET(r, TS_PDIV_PLLX, scp->pdiv);
 	soctherm_writel(r, TS_PDIV);
-
-	/* Thermal Sensing programming */
-	if (soctherm_fuse_read_calib_base() < 0)
-		return -EINVAL;
-
-	for (i = 0; i < TSENSE_SIZE; i++) {
-		soctherm_tsense_program(i, scp);
-		if (soctherm_fuse_read_tsensor(i) < 0)
-			return -EINVAL;
-	}
 #endif
 
 	/* Sanitize therm trips */
@@ -2938,7 +2933,7 @@ static int soctherm_init_platform_data(struct soctherm_platform_data *plat)
 		}
 	}
 
-	r = en_hw_off_reg = hw_off_max_reg = 0;
+	r = en_hw_off_reg = hw_off_max_reg = hw_off_min_reg = 0;
 	/* Program hotspot offsets per THERM */
 	r = REG_SET(r, TS_HOTSPOT_OFF_CPU,
 		    plat->therm[THERM_CPU].hotspot_offset / 1000);
@@ -2961,27 +2956,37 @@ static int soctherm_init_platform_data(struct soctherm_platform_data *plat)
 		en_hw_off_reg = REG_SET(en_hw_off_reg,
 				TH_TS_EN_HW_PLLX_OFFSET_CPU, 1);
 		hw_off_max_reg = REG_SET(
-				hw_off_max_reg, TH_TS_PLLX_MAX_CPU_OFFSET,
-				plat->therm[THERM_CPU].pllx_offset_max / 1000);
+				hw_off_max_reg, TH_TS_PLLX_CPU_OFFSET,
+				plat->therm[THERM_CPU].pllx_offset_max / 500);
+		hw_off_min_reg = REG_SET(
+				hw_off_min_reg, TH_TS_PLLX_CPU_OFFSET,
+				plat->therm[THERM_CPU].pllx_offset_min / 500);
 	}
 
 	if (plat->therm[THERM_GPU].en_hw_pllx_offsetting) {
 		en_hw_off_reg = REG_SET(en_hw_off_reg,
 				TH_TS_EN_HW_PLLX_OFFSET_GPU, 1);
 		hw_off_max_reg = REG_SET(
-				hw_off_max_reg, TH_TS_PLLX_MAX_GPU_OFFSET,
-				plat->therm[THERM_GPU].pllx_offset_max / 1000);
+				hw_off_max_reg, TH_TS_PLLX_GPU_OFFSET,
+				plat->therm[THERM_GPU].pllx_offset_max / 500);
+		hw_off_min_reg = REG_SET(
+				hw_off_min_reg, TH_TS_PLLX_GPU_OFFSET,
+				plat->therm[THERM_CPU].pllx_offset_min / 500);
 	}
 
 	if (plat->therm[THERM_MEM].en_hw_pllx_offsetting) {
 		en_hw_off_reg = REG_SET(en_hw_off_reg,
 				TH_TS_EN_HW_PLLX_OFFSET_MEM, 1);
 		hw_off_max_reg = REG_SET(
-				hw_off_max_reg, TH_TS_PLLX_MAX_MEM_OFFSET,
-				plat->therm[THERM_MEM].pllx_offset_max / 1000);
+				hw_off_max_reg, TH_TS_PLLX_MEM_OFFSET,
+				plat->therm[THERM_MEM].pllx_offset_max / 500);
+		hw_off_min_reg = REG_SET(
+				hw_off_min_reg, TH_TS_PLLX_MEM_OFFSET,
+				plat->therm[THERM_CPU].pllx_offset_min / 500);
 	}
 
 	soctherm_writel(hw_off_max_reg, TH_TS_PLLX_OFFSET_MAX);
+	soctherm_writel(hw_off_min_reg, TH_TS_PLLX_OFFSET_MIN);
 	soctherm_writel(en_hw_off_reg, TH_TS_PLLX_OFFSETTING);
 
 	/* configure low, med and heavy levels for CCROC NV_THERM */
@@ -3054,12 +3059,11 @@ static int soctherm_init_platform_data(struct soctherm_platform_data *plat)
 	/* Thermtrip */
 	for (i = 0; i < THERM_SIZE; i++) {
 		therm = &plat->therm[i];
-		if (!therm->zone_enable)
-			continue;
 
 		for (j = 0; j < therm->num_trips; j++) {
 			if (therm->trips[j].trip_type != THERMAL_TRIP_CRITICAL)
 				continue;
+			num_thermal_trip_critical++;
 			if (i == THERM_GPU) {
 				gsh = therm->trips[j].trip_temp;
 			} else if ((i == THERM_MEM) &&
@@ -3070,7 +3074,27 @@ static int soctherm_init_platform_data(struct soctherm_platform_data *plat)
 			}
 			prog_hw_shutdown(therm->trips[j].trip_temp, i);
 		}
+
+		if (therm->tz) {
+			prog_therm_thresholds(therm);
+			pr_info("soctherm: prog thresholds\n");
+		} else
+			pr_info("soctherm: tz:%d not found, skip thresh prog\n",
+					i); /* continue */
 	}
+
+	/* Thermal Sensing programming */
+	if (soctherm_fuse_read_calib_base() < 0)
+		return -EINVAL;
+
+	for (i = 0; i < TSENSE_SIZE; i++) {
+		soctherm_fuse_read_tsensor(i);
+		soctherm_tsense_program(i, scp);
+	}
+
+	/* Disable H/W shutdown if there is no critical thermal trip. */
+	if (num_thermal_trip_critical == 0)
+		prog_hw_shutdown(MAX_HIGH_TEMP, THERM_NONE);
 
 	soctherm_adjust_zone(THERM_CPU);
 	soctherm_adjust_zone(THERM_GPU);
@@ -3130,15 +3154,18 @@ static int soctherm_suspend(struct device *dev)
  */
 static void soctherm_resume_locked(void)
 {
+	int ret = -ENODEV;
+
 	if (soctherm_suspended) {
 		/* soctherm_clk_enable(true);*/
 		soctherm_suspended = false;
-		soctherm_init_platform_data(pp);
+		ret = soctherm_init_platform_data(pp);
 		soctherm_init_platform_done = true;
 		soctherm_update();
 		enable_irq(INT_THERMAL);
 		enable_irq(INT_EDP);
 	}
+	pr_info("soctherm: resume status:%d\n", ret);
 }
 
 /**
@@ -4218,11 +4245,11 @@ static int tempoverride_set(void *data, u64 val)
 	return 0;
 }
 
-DEFINE_SIMPLE_ATTRIBUTE(convert_fops, convert_get, convert_set, "%llu\n");
-DEFINE_SIMPLE_ATTRIBUTE(cputemp_fops, cputemp_get, cputemp_set, "%llu\n");
-DEFINE_SIMPLE_ATTRIBUTE(gputemp_fops, gputemp_get, gputemp_set, "%llu\n");
-DEFINE_SIMPLE_ATTRIBUTE(memtemp_fops, memtemp_get, memtemp_set, "%llu\n");
-DEFINE_SIMPLE_ATTRIBUTE(plltemp_fops, plltemp_get, plltemp_set, "%llu\n");
+DEFINE_SIMPLE_ATTRIBUTE(convert_fops, convert_get, convert_set, "%lld\n");
+DEFINE_SIMPLE_ATTRIBUTE(cputemp_fops, cputemp_get, cputemp_set, "%lld\n");
+DEFINE_SIMPLE_ATTRIBUTE(gputemp_fops, gputemp_get, gputemp_set, "%lld\n");
+DEFINE_SIMPLE_ATTRIBUTE(memtemp_fops, memtemp_get, memtemp_set, "%lld\n");
+DEFINE_SIMPLE_ATTRIBUTE(plltemp_fops, plltemp_get, plltemp_set, "%lld\n");
 DEFINE_SIMPLE_ATTRIBUTE(tempoverride_fops, tempoverride_get, tempoverride_set,
 			"%llu\n");
 
@@ -4529,12 +4556,15 @@ static void soctherm_thermctl_parse(struct platform_device *pdev)
 				"enable-hw-pllx-offsetting");
 		if (pp->therm[id].en_hw_pllx_offsetting) {
 			/*
-			 * pllx-offset-max is an optional property in DT
+			 * pllx-offset-max/min is an optional property in DT
 			 */
 			if (!of_property_read_u32(np, "pllx-offset-max", &val))
 				pp->therm[id].pllx_offset_max = val;
 			else
 				pp->therm[id].pllx_offset_max = PLLX_OFFSET_MAX;
+
+			if (!of_property_read_u32(np, "pllx-offset-min", &val))
+				pp->therm[id].pllx_offset_min = val;
 		}
 	}
 }

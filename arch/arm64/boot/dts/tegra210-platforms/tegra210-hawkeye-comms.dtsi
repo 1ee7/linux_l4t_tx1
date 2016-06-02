@@ -13,6 +13,11 @@
 	};
 
 	bcmdhd_wlan {
+		/* wifi MAC address */
+		mac-address-chosen-dtb-node = "nvidia,wifi-mac";
+		mac-address-file = "/mnt/factory/wifi/wifi_mac.txt";
+		fw_path = "/system/vendor/firmware/fw_bcmdhd.bin";
+		nv_path = "/system/etc/nvram_hawkeye_4354.txt";
 		country_code_map {
 			CC1 {
 				iso_abbrev = "XV";
@@ -143,11 +148,6 @@
 				iso_abbrev = "E0";
 				custom_locale = "E0";
 				custom_locale_rev = <53>;
-			};
-			CC27 {
-				iso_abbrev = "IN";
-				custom_locale = "Q2";
-				custom_locale_rev = <998>;
 			};
 		};
 	};

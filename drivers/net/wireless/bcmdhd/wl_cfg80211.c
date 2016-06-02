@@ -68,7 +68,6 @@
 #include <wl_cfg80211.h>
 #include <wl_cfgp2p.h>
 #include <wl_android.h>
-#include <wl_cfgvendor.h>
 #ifdef WL_NAN
 #include <wl_cfgnan.h>
 #endif /* WL_NAN */
@@ -77,6 +76,9 @@
 #include <dhd_wlfc.h>
 #endif
 
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(3, 13, 0)) || defined(WL_VENDOR_EXT_SUPPORT)
+#include <wl_cfgvendor.h>
+#endif /* (LINUX_VERSION_CODE > KERNEL_VERSION(3, 13, 0)) || defined(WL_VENDOR_EXT_SUPPORT) */
 #ifdef WL11U
 #if !defined(WL_ENABLE_P2P_IF) && !defined(WL_CFG80211_P2P_DEV_IF)
 #error You should enable 'WL_ENABLE_P2P_IF' or 'WL_CFG80211_P2P_DEV_IF' \
@@ -96,6 +98,8 @@ static struct device *cfg80211_parent_dev = NULL;
 /* g_bcm_cfg should be static. Do not change */
 static struct bcm_cfg80211 *g_bcm_cfg = NULL;
 u32 wl_dbg_level = WL_DBG_ERR;
+
+extern int op_mode;
 
 #ifdef WLAIBSS_MCHAN
 #define IBSS_IF_NAME "ibss%d"
@@ -1191,8 +1195,9 @@ wl_validate_wps_ie(char *wps_ie, s32 wps_ie_len, bool *pbc)
 			WL_DBG(("  attr WPS_ID_CONFIG_METHODS: %x\n", HTON16(val)));
 		} else if (subelt_id == WPS_ID_DEVICE_NAME) {
 			char devname[100];
-			memcpy(devname, subel, subelt_len);
-			devname[subelt_len] = '\0';
+			size_t namelen = MIN(subelt_len, sizeof(devname)-1);
+			memcpy(devname, subel, namelen);
+			devname[namelen] = '\0';
 			WL_DBG(("  attr WPS_ID_DEVICE_NAME: %s (len %u)\n",
 				devname, subelt_len));
 		} else if (subelt_id == WPS_ID_DEVICE_PWD_ID) {
@@ -6456,8 +6461,17 @@ wl_cfg80211_set_channel(struct wiphy *wiphy, struct net_device *dev,
 						   to 5, 10, 20 ,40 ,80, 160, 80+80 MHz
 						   respectively. In below case, 0x1000 = 2
 						   which is for 20 MHz */
-						if((chanspec & 0x3800) == 0x1000)
+						if ((chanspec & 0x3800) == WL_CHANSPEC_BW_20) {
 							bw = WL_CHANSPEC_BW_20;
+						} else if ((chanspec & 0x3800) == WL_CHANSPEC_BW_40) {
+							bw = WL_CHANSPEC_BW_40;
+						} else if ((chanspec & 0x3800) == WL_CHANSPEC_BW_80) {
+							bw = WL_CHANSPEC_BW_80;
+						} else if ((chanspec & 0x3800) == WL_CHANSPEC_BW_160) {
+							bw = WL_CHANSPEC_BW_160;
+						} else if ((chanspec & 0x3800) == WL_CHANSPEC_BW_8080) {
+							bw = WL_CHANSPEC_BW_8080;
+						}
 					}
 				} else {
 					/* In 2.4 GHz supported bw is 20 MHz */
@@ -8421,7 +8435,8 @@ static s32 wl_setup_wiphy(struct wireless_dev *wdev, struct device *sdiofunc_dev
 	 * probe response frame in case of SoftAP mode,
 	 * AP_PROBE_RESP_OFFLOAD flag is set to wiphy->flags variable.
 	 */
-	if (dhd_get_fw_mode(dhd->info) == DHD_FLAG_HOSTAP_MODE) {
+	if ((!op_mode && dhd_get_fw_mode(dhd->info) == DHD_FLAG_HOSTAP_MODE) ||
+	    (op_mode == DHD_FLAG_HOSTAP_MODE)) {
 		wdev->wiphy->flags |= WIPHY_FLAG_AP_PROBE_RESP_OFFLOAD;
 		wdev->wiphy->probe_resp_offload = 0;
 	}
@@ -8458,11 +8473,14 @@ static s32 wl_setup_wiphy(struct wireless_dev *wdev, struct device *sdiofunc_dev
 #endif
 	wiphy_apply_custom_regulatory(wdev->wiphy, &brcm_regdom);
 
-	WL_DBG(("Registering Vendor80211)\n"));
-	err = cfgvendor_attach(wdev->wiphy);
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(3, 13, 0)) || defined(WL_VENDOR_EXT_SUPPORT)
+	WL_ERR(("Registering Vendor80211\n"));
+	err = wl_cfgvendor_attach(wdev->wiphy, dhd);
 	if (unlikely(err < 0)) {
 		WL_ERR(("Couldn not attach vendor commands (%d)\n", err));
 	}
+#endif /* (LINUX_VERSION_CODE > KERNEL_VERSION(3, 13, 0)) || defined(WL_VENDOR_EXT_SUPPORT) */
+
 
 	/* Now we can register wiphy with cfg80211 module */
 	err = wiphy_register(wdev->wiphy);
@@ -8489,7 +8507,9 @@ static void wl_free_wdev(struct bcm_cfg80211 *cfg)
 	}
 	wiphy = wdev->wiphy;
 
-	cfgvendor_detach(wdev->wiphy);
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(3, 13, 0)) || defined(WL_VENDOR_EXT_SUPPORT)
+	wl_cfgvendor_detach(wdev->wiphy);
+#endif /* if (LINUX_VERSION_CODE > KERNEL_VERSION(3, 13, 0)) || defined(WL_VENDOR_EXT_SUPPORT) */
 
 	wiphy_unregister(wdev->wiphy);
 	wdev->wiphy->dev.parent = NULL;
@@ -9024,10 +9044,8 @@ wl_notify_connect_status(struct bcm_cfg80211 *cfg, bcm_struct_cfgdev *cfgdev,
 			}
 #endif /* P2PLISTEN_AP_SAMECHN */
 
-#ifdef ESCAN_RESULT_ABORT
 			if (cfg->scan_request)
 				wl_notify_escan_complete(cfg, ndev, true, true);
-#endif
 			if (wl_get_drv_status(cfg, CONNECTED, ndev)) {
 				scb_val_t scbval;
 				u8 *curbssid = wl_read_prof(cfg, ndev, WL_PROF_BSSID);
@@ -10180,9 +10198,9 @@ wl_notify_sched_scan_results(struct bcm_cfg80211 *cfg, struct net_device *ndev,
 			 * scan request in the form of cfg80211_scan_request. For timebeing, create
 			 * cfg80211_scan_request one out of the received PNO event.
 			 */
+			ssid[i].ssid_len = MIN(DOT11_MAX_SSID_LEN, netinfo->pfnsubnet.SSID_len);
 			memcpy(ssid[i].ssid, netinfo->pfnsubnet.SSID,
-				netinfo->pfnsubnet.SSID_len);
-			ssid[i].ssid_len = netinfo->pfnsubnet.SSID_len;
+			       ssid[i].ssid_len);
 			request->n_ssids++;
 
 			channel_req = netinfo->pfnsubnet.channel;

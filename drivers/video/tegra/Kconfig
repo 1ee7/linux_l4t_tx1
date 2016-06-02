@@ -118,7 +118,7 @@ config TEGRA_MIPI_CAL
 
 config TEGRA_DC_SCAN_COLUMN
 	bool
-	depends on TEGRA_DC && (ARCH_TEGRA_11x_SOC || ARCH_TEGRA_12x_SOC || ARCH_TEGRA_21x_SOC)
+	depends on TEGRA_DC && (ARCH_TEGRA_11x_SOC || ARCH_TEGRA_12x_SOC || ARCH_TEGRA_21x_SOC || TEGRA_NVDISPLAY)
 	default y
 	help
 	  Enables access to scan column mode for providing 90 and 270 rotation.
@@ -286,7 +286,7 @@ config TEGRA_DSI2EDP_SN65DSI86
 
 config TEGRA_DP
 	bool "Enable eDP panel."
-	default  n
+	default  y
 	help
 	  Say Y here to enable eDP panel.
 
@@ -299,6 +299,16 @@ config TEGRA_HDMI2_0
 	  Supported by sor-hdmi only.
 	  Suported on T21x and later chips only.
 	  Disabled by default since most chips are using older controller at present.
+
+config TEGRA_HDA_DC
+	bool "Enable HDA DC driver"
+	depends on TEGRA_HDMI2_0 || (TEGRA_DP && (ARCH_TEGRA_21x_SOC || ARCH_TEGRA_18x_SOC))
+	default y
+	help
+	  Say Y here to enable separate HDA driver in DC space.
+	  Separate HDA driver is written to support both DP/HDMI from same code.
+	  Removes redundancy of HDA code, so it doesn't get duplicated for each client.
+	  Supported for T21x and later chips only which have HDMI2_0 or DP enabled.
 
 config TEGRA_LVDS
 	bool "Enable LVDS panel."
@@ -345,6 +355,14 @@ config TEGRA_VRR
 	help
 	  Say Y here to support VRR.
 
+config TEGRA_HDMIVRR
+	bool "Enable HDMIVRR Support."
+	default  n
+	help
+	  Say Y here to support HDMIVRR. HDMIVRR monitor supports variable
+	  refresh rate so that the display scanout matches graphics rendering
+	  speed. It is enabled to improve user experience for games and videos.
+
 config NVMAP_CONVERT_CARVEOUT_TO_IOVMM
 	bool "Convert carveout to IOVMM"
 	depends on TEGRA_NVMAP && IOMMU_API && !NVMAP_CONVERT_IOVMM_TO_CARVEOUT
@@ -356,7 +374,6 @@ config NVMAP_CONVERT_CARVEOUT_TO_IOVMM
 config NVMAP_CONVERT_IOVMM_TO_CARVEOUT
 	bool "Convert IOVMM to carveout"
 	depends on TEGRA_NVMAP && IOMMU_API && ARCH_TEGRA_18x_SOC
-	default y
 	help
 	  Say Y here to force to convert I/O virtual memory requests to
 	  carveout memory requests.
@@ -392,6 +409,23 @@ config TEGRA_DEBUG_HDCP
 	  It is only required if you need to modify the number of retries for HDCP
 	  authentication.
 
+config TEGRA_DPHDCP
+	bool "Support HDCP content protection on DP"
+	depends on TEGRA_DP
+	help
+          Say Y here to support HDCP upstream and downstream protocols for DP,
+          This requires a correctly fused chip to negotiate keys.
+	  It is needed if you have an application that cares about checking
+	  for HDCP security while playing protected content.
+
+config TEGRA_DEBUG_DP_HDCP
+	bool "Support Debug mode for HDCP on DP"
+	depends on TEGRA_DPHDCP
+	default n
+	help
+	  Say Y here to expose debugfs nodes for HDCP content protection on DP.
+          It is needed to modify the number of retries for HDCP authentication.
+
 config TEGRA_HDMI_74MHZ_LIMIT
 	bool "Support only up to 74.25 MHz HDMI pixel frequency"
 	depends on TEGRA_HDMI
@@ -416,14 +450,6 @@ config TEGRA_CAMERA_PLATFORM
 	  Enables tegra camera platform driver
 
 	  If unsure, say Y
-
-config VI_ONE_DEVICE
-	bool "Enables one Vi device support"
-	depends on ARCH_TEGRA
-	default n
-	help
-	  Say Y here to nvhost to add only one Vi device node.
-	  If unsure, say N
 
 config TEGRA_DC_FAKE_PANEL_SUPPORT
 	bool "Enables fake panel and NULL OR support"

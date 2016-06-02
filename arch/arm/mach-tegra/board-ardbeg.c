@@ -1,7 +1,7 @@
 /*
  * arch/arm/mach-tegra/board-ardbeg.c
  *
- * Copyright (c) 2013-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2013-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -42,6 +42,7 @@
 #include <linux/skbuff.h>
 #include <linux/ti_wilink_st.h>
 #include <linux/regulator/consumer.h>
+#include <linux/regulator/machine.h>
 #include <linux/smb349-charger.h>
 #include <linux/max17048_battery.h>
 #include <linux/leds.h>
@@ -330,6 +331,7 @@ static void ardbeg_audio_init(void)
 		if (board_info.board_id == BOARD_E1762 ||
 			board_info.board_id == BOARD_P1761 ||
 			board_info.board_id == BOARD_E1922 ||
+			board_info.board_id == BOARD_E1784 ||
 			of_machine_is_compatible("nvidia,green-arrow")) {
 			ardbeg_audio_pdata_rt5639.gpio_hp_det =
 				TEGRA_GPIO_CDC_IRQ;
@@ -800,15 +802,10 @@ static struct of_dev_auxdata ardbeg_auxdata_lookup[] __initdata = {
 #endif
 	OF_DEV_AUXDATA("nvidia,tegra124-msenc", TEGRA_MSENC_BASE, "msenc",
 		NULL),
-#ifdef CONFIG_VI_ONE_DEVICE
 	OF_DEV_AUXDATA("nvidia,tegra124-vi", TEGRA_VI_BASE, "vi", NULL),
-#else
-	OF_DEV_AUXDATA("nvidia,tegra124-vi", TEGRA_VI_BASE, "vi.0", NULL),
-#endif
 	OF_DEV_AUXDATA("nvidia,tegra124-isp", TEGRA_ISP_BASE, "isp.0", NULL),
 	OF_DEV_AUXDATA("nvidia,tegra124-isp", TEGRA_ISPB_BASE, "isp.1", NULL),
 	OF_DEV_AUXDATA("nvidia,tegra124-tsec", TEGRA_TSEC_BASE, "tsec", NULL),
-	T124_I2C_OF_DEV_AUXDATA,
 	OF_DEV_AUXDATA("nvidia,tegra124-xhci", 0x70090000, "tegra-xhci",
 				&xusb_pdata),
 	OF_DEV_AUXDATA("nvidia,tegra132-xhci", 0x70090000, "tegra-xhci",
@@ -1063,7 +1060,8 @@ static int __init ardbeg_touch_init(void)
 					&rm31080ts_t132loki_data,
 					&rm31080a_ardbeg_spi_board[0],
 					ARRAY_SIZE(rm31080a_ardbeg_spi_board));
-		} else if (board_info.board_id == BOARD_P1761) {
+		} else if ((board_info.board_id == BOARD_P1761) ||
+			(board_info.board_id == BOARD_E1784)) {
 			rm31080a_tn8_spi_board[0].irq =
 				gpio_to_irq(TOUCH_GPIO_IRQ_RAYDIUM_SPI);
 			touch_init_raydium(TOUCH_GPIO_IRQ_RAYDIUM_SPI,
@@ -1388,6 +1386,9 @@ static struct notifier_block i2c_nb = {
 
 static void __init tegra_ardbeg_dt_init(void)
 {
+	if(of_machine_is_compatible("nvidia,green-arrow"))
+		regulator_has_full_constraints();
+
 	tegra_get_board_info(&board_info);
 	tegra_get_display_board_info(&display_board_info);
 

@@ -370,32 +370,6 @@ static ssize_t blake_store_speed(struct device *dev,
 	return count;
 }
 
-
-static int nvidia_ff_play(struct input_dev *dev, void *data,
-			 struct ff_effect *effect)
-{
-	struct hid_device *hid = input_get_drvdata(dev);
-	struct nvidia_tp_loc *loc = data;
-	int left, right, length;
-
-	left = effect->u.rumble.strong_magnitude;
-	right = effect->u.rumble.weak_magnitude;
-	length = effect->replay.length;
-
-	dbg_hid("called with 0x%04x 0x%04x 0x%04x", left, right, length);
-
-	length = length > 10000 ? 10000 : length;
-
-	loc->ff_report->field[0]->value[0] = left;
-	loc->ff_report->field[0]->value[1] = right;
-	loc->ff_report->field[0]->value[2] = length;
-
-	hid_hw_request(hid, loc->ff_report, HID_REQ_SET_REPORT);
-
-	return 0;
-}
-
-
 static int nvidia_find_tp_len(struct hid_device *hdev,
 	struct nvidia_tp_loc *loc)
 {
@@ -431,56 +405,6 @@ static int nvidia_find_tp_len(struct hid_device *hdev,
 	return 0;
 }
 
-static int nvidia_init_ff(struct hid_device *hdev, struct nvidia_tp_loc *loc)
-{
-	struct hid_report *report;
-	struct hid_input *hidinput = list_entry(hdev->inputs.next,
-						struct hid_input, list);
-	struct list_head *report_list =
-			&hdev->report_enum[HID_OUTPUT_REPORT].report_list;
-	struct input_dev *dev = hidinput->input;
-	int error;
-
-	if (list_empty(report_list)) {
-		hid_err(hdev, "no output reports found\n");
-		return -ENODEV;
-	}
-
-	list_for_each_entry(report, report_list, list) {
-		if (report->maxfield < 1) {
-			hid_warn(hdev, "no fields in the report\n");
-			continue;
-		}
-
-		if (report->field[0]->report_count != 3) {
-			hid_warn(hdev, "not right number of values in the field\n");
-			continue;
-		}
-
-		goto found_report;
-	}
-	hid_warn(hdev, "FF report not found\n");
-	loc->ff_report = NULL;
-	return -ENODEV;
-
-found_report:
-	loc->ff_report = report;
-
-	set_bit(FF_RUMBLE, dev->ffbit);
-	error = input_ff_create_memless(dev, loc, nvidia_ff_play);
-
-	if (error) {
-		loc->ff_report = NULL;
-		clear_bit(FF_RUMBLE, dev->ffbit);
-		hid_warn(hdev, "Couldn't create FF device");
-		return error;
-	}
-
-	hid_info(hdev, "Force feedback enabled\n");
-
-	return 0;
-}
-
 static DEVICE_ATTR(speed, S_IRUGO | S_IWUSR,
 	blake_show_speed, blake_store_speed);
 static DEVICE_ATTR(mode, S_IRUGO | S_IWUSR,
@@ -491,9 +415,7 @@ static int nvidia_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	int ret;
 	struct nvidia_tp_loc *loc;
 
-	loc = (struct nvidia_tp_loc *)
-		kmalloc(sizeof(struct nvidia_tp_loc *), GFP_KERNEL);
-
+	loc = devm_kzalloc(&hdev->dev, sizeof(*loc), GFP_KERNEL);
 	if (!loc) {
 		hid_err(hdev, "cannot alloc device touchpad state\n");
 		return -ENOMEM;
@@ -517,7 +439,6 @@ static int nvidia_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	if (ret)
 		goto err_parse;
 
-	nvidia_init_ff(hdev, loc);
 	nvidia_find_tp_len(hdev, loc);
 
 	ret = device_create_file(&hdev->dev, &dev_attr_speed);
@@ -536,7 +457,6 @@ static int nvidia_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	return 0;
 
 err_parse:
-	kfree(loc);
 	return ret;
 }
 

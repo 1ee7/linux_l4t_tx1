@@ -2538,15 +2538,10 @@ int wl_android_priv_cmd(struct net_device *net, struct ifreq *ifr, int cmd)
 #ifdef WL_CFG80211
 	/* CUSTOMER_SET_COUNTRY feature is define for only GGSM model */
 	else if (strnicmp(command, CMD_COUNTRY, strlen(CMD_COUNTRY)) == 0) {
-#ifdef CUSTOMER_HW5
-		char *country_code = command + strlen(CMD_COUNTRY) + 1;
-		/* Customer_hw5 want to keep connections */
-		bytes_written = wldev_set_country(net, country_code, true, false);
-#else
 		/* We use only NV_COUNTRY command to set the country code
-		 * Do not allow default COUNTRY command to set the country code */
+		 * Do not allow default COUNTRY command as third party apps
+		 * can manipulate WiFi country code */
 		bytes_written = 0;
-#endif
 	} else if (strnicmp(command, CMD_NV_COUNTRY, strlen(CMD_NV_COUNTRY)) == 0) {
 		char *country_code = command + strlen(CMD_NV_COUNTRY) + 1;
 		bytes_written = wldev_set_country(net, country_code, true, false);

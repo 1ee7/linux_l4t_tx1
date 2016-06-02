@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2015-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -138,7 +138,7 @@ void nvtouch_calibrate(unsigned int calibrate, char factor);
 void nvtouch_unpack_data(void *input, short *output);
 u32 nvtouch_get_driver_mode(void);
 
-#define NVTOUCH_DRIVER_VERSION 4
+#define NVTOUCH_DRIVER_VERSION 5
 
 #define NVTOUCH_SENSOR_DATA_RESERVED 5000
 
@@ -182,6 +182,11 @@ struct nvtouch_ioctl_data {
 #define NVTOUCH_CONFIG_REPORT_MODE_SHIFT (3)
 #define NVTOUCH_CONFIG_REPORT_MODE_MASK  (7 << 3)
 #define NVTOUCH_CONFIG_ENABLE_DTA (1 << 8)
+#define NVTOUCH_CONFIG_ENABLE_CALIBRATION (1 << 9)
+#define NVTOUCH_CONFIG_ENABLE_CALIBRATION_DEBUG (1 << 10)
+#define NVTOUCH_CONFIG_TUNE_DEBUG (1 << 11)
+#define NVTOUCH_CONFIG_TUNE_PARAM_SHIFT (12)
+#define NVTOUCH_CONFIG_TUNE_PARAM_MASK  (255 << 12)
 
 	struct nvtouch_events vendor_events;
 	u32 pm_active_to_lp_timeout_ms;

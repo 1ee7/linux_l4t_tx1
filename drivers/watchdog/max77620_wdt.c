@@ -1,7 +1,7 @@
 /*
  * Watchdog timer for Max77620 PMIC.
  *
- * Copyright (c) 2014, NVIDIA Corporation. All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA Corporation. All rights reserved.
  *
  * Author: Chaitanya Bandi <bandik@nvidia.com>
  *
@@ -201,10 +201,12 @@ static int _max77620_wdt_set_timeout(struct watchdog_device *wdt_dev,
 	}
 
 	wdt->current_timeout = timeout;
+	wdt_dev->timeout = timeout;
 	dev_info(wdt->dev, "Setting WDT timeout %d\n", timeout);
 	return 0;
 }
 
+#ifdef CONFIG_PM_SLEEP
 static int max77620_wdt_restart(struct watchdog_device *wdt_dev,
 		unsigned int timeout)
 {
@@ -220,6 +222,7 @@ static int max77620_wdt_restart(struct watchdog_device *wdt_dev,
 		ret = max77620_wdt_start(wdt_dev);
 	return ret;
 }
+#endif
 
 static int max77620_wdt_set_timeout(struct watchdog_device *wdt_dev,
 		unsigned int timeout)
@@ -527,6 +530,7 @@ static void max77620_wdt_shutdown(struct platform_device *pdev)
 		cancel_delayed_work(&wdt->clear_wdt_wq);
 }
 
+#ifdef CONFIG_PM_SLEEP
 static int max77620_wdt_suspend(struct device *dev)
 {
 	struct max77620_wdt *wdt = dev_get_drvdata(dev);
@@ -574,6 +578,7 @@ static int max77620_wdt_resume(struct device *dev)
 		ret = max77620_wdt_stop(&wdt->wdt_dev);
 		if (ret < 0)
 			dev_err(wdt->dev, "wdt stop failed: %d\n", ret);
+		wdt->current_timeout = 0;
 		return ret;
 	}
 
@@ -587,6 +592,7 @@ wq_start:
 				msecs_to_jiffies(wdt->clear_time * HZ));
 	return 0;
 }
+#endif
 
 static const struct dev_pm_ops max77620_wdt_pm_ops = {
 	SET_SYSTEM_SLEEP_PM_OPS(max77620_wdt_suspend, max77620_wdt_resume)

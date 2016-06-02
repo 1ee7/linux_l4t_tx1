@@ -1,7 +1,7 @@
 /*
  * GK20A Graphics channel
  *
- * Copyright (c) 2011-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2011-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -61,6 +61,8 @@ static void channel_gk20a_bind(struct channel_gk20a *ch_gk20a);
 static int channel_gk20a_update_runlist(struct channel_gk20a *c,
 					bool add);
 static void gk20a_free_error_notifiers(struct channel_gk20a *ch);
+
+static void gk20a_channel_clean_up_jobs(struct work_struct *work);
 
 /* allocate GPU channel */
 static struct channel_gk20a *allocate_channel(struct fifo_gk20a *f)
@@ -188,7 +190,7 @@ static int channel_gk20a_set_schedule_params(struct channel_gk20a *c,
 }
 
 int channel_gk20a_setup_ramfc(struct channel_gk20a *c,
-			u64 gpfifo_base, u32 gpfifo_entries)
+			u64 gpfifo_base, u32 gpfifo_entries, u32 flags)
 {
 	void *inst_ptr;
 
@@ -280,7 +282,7 @@ static void channel_gk20a_bind(struct channel_gk20a *ch_gk20a)
 	struct fifo_engine_info_gk20a *engine_info =
 		f->engine_info + ENGINE_GR_GK20A;
 
-	u32 inst_ptr = sg_phys(ch_gk20a->inst_block.sgt->sgl)
+	u32 inst_ptr = gk20a_mem_phys(&ch_gk20a->inst_block)
 		>> ram_in_base_shift_v();
 
 	gk20a_dbg_info("bind channel %d inst ptr 0x%08x",
@@ -323,10 +325,13 @@ void channel_gk20a_unbind(struct channel_gk20a *ch_gk20a)
 	 * resource at this point
 	 * if not, then it will be destroyed at channel_free()
 	 */
+	mutex_lock(&ch_gk20a->sync_lock);
 	if (ch_gk20a->sync && platform->aggressive_sync_destroy) {
+
 		ch_gk20a->sync->destroy(ch_gk20a->sync);
 		ch_gk20a->sync = NULL;
 	}
+	mutex_unlock(&ch_gk20a->sync_lock);
 }
 
 int channel_gk20a_alloc_inst(struct gk20a *g, struct channel_gk20a *ch)
@@ -340,7 +345,7 @@ int channel_gk20a_alloc_inst(struct gk20a *g, struct channel_gk20a *ch)
 		return err;
 
 	gk20a_dbg_info("channel %d inst block physical addr: 0x%16llx",
-		ch->hw_chid, (u64)sg_phys(ch->inst_block.sgt->sgl));
+		ch->hw_chid, (u64)gk20a_mem_phys(&ch->inst_block));
 
 	gk20a_dbg_fn("done");
 	return 0;
@@ -373,7 +378,7 @@ void channel_gk20a_disable(struct channel_gk20a *ch)
 			ccsr_channel_enable_clr_true_f());
 }
 
-void gk20a_channel_abort(struct channel_gk20a *ch)
+void gk20a_channel_abort(struct channel_gk20a *ch, bool channel_preempt)
 {
 	struct channel_gk20a_job *job, *n;
 	bool released_job_semaphore = false;
@@ -385,11 +390,14 @@ void gk20a_channel_abort(struct channel_gk20a *ch)
 
 	ch->g->ops.fifo.disable_channel(ch);
 
+	if (channel_preempt)
+		gk20a_fifo_preempt(ch->g, ch);
+
 	/* ensure no fences are pending */
-	mutex_lock(&ch->submit_lock);
+	mutex_lock(&ch->sync_lock);
 	if (ch->sync)
 		ch->sync->set_min_eq_max(ch->sync);
-	mutex_unlock(&ch->submit_lock);
+	mutex_unlock(&ch->sync_lock);
 
 	/* release all job semaphores (applies only to jobs that use
 	   semaphore synchronization) */
@@ -402,10 +410,10 @@ void gk20a_channel_abort(struct channel_gk20a *ch)
 	}
 	mutex_unlock(&ch->jobs_lock);
 
-	if (released_job_semaphore) {
+	if (released_job_semaphore)
 		wake_up_interruptible_all(&ch->semaphore_wq);
-		gk20a_channel_update(ch, 0);
-	}
+
+	gk20a_channel_update(ch, 0);
 }
 
 int gk20a_wait_channel_idle(struct channel_gk20a *ch)
@@ -434,26 +442,9 @@ int gk20a_wait_channel_idle(struct channel_gk20a *ch)
 	return 0;
 }
 
-void gk20a_disable_channel(struct channel_gk20a *ch,
-			   bool finish,
-			   unsigned long finish_timeout)
+void gk20a_disable_channel(struct channel_gk20a *ch)
 {
-	gk20a_dbg_fn("");
-
-	if (finish) {
-		int err = gk20a_channel_finish(ch, finish_timeout);
-		WARN_ON(err);
-	}
-
-	/* disable the channel from hw and increment syncpoints */
-	gk20a_channel_abort(ch);
-
-	gk20a_wait_channel_idle(ch);
-
-	/* preempt the channel */
-	gk20a_fifo_preempt(ch->g, ch);
-
-	/* remove channel from runlist */
+	gk20a_channel_abort(ch, true);
 	channel_gk20a_update_runlist(ch, false);
 }
 
@@ -479,6 +470,11 @@ static int gk20a_channel_cycle_stats(struct channel_gk20a *ch,
 {
 	struct dma_buf *dmabuf;
 	void *virtual_address;
+
+	/* is it allowed to handle calls for current GPU? */
+	if (0 == (ch->g->gpu_characteristics.flags &
+			NVGPU_GPU_FLAGS_SUPPORT_CYCLE_STATS))
+		return -ENOSYS;
 
 	if (args->dmabuf_fd && !ch->cyclestate.cyclestate_buffer_handler) {
 
@@ -510,13 +506,109 @@ static int gk20a_channel_cycle_stats(struct channel_gk20a *ch,
 		return -EINVAL;
 	}
 }
+
+
+static int gk20a_flush_cycle_stats_snapshot(struct channel_gk20a *ch)
+{
+	int ret;
+
+	mutex_lock(&ch->cs_client_mutex);
+	if (ch->cs_client)
+		ret = gr_gk20a_css_flush(ch->g, ch->cs_client);
+	else
+		ret = -EBADF;
+	mutex_unlock(&ch->cs_client_mutex);
+
+	return ret;
+}
+
+static int gk20a_attach_cycle_stats_snapshot(struct channel_gk20a *ch,
+				u32 dmabuf_fd,
+				u32 perfmon_id_count,
+				u32 *perfmon_id_start)
+{
+	int ret;
+
+	mutex_lock(&ch->cs_client_mutex);
+	if (ch->cs_client) {
+		ret = -EEXIST;
+	} else {
+		ret = gr_gk20a_css_attach(ch->g,
+					dmabuf_fd,
+					perfmon_id_count,
+					perfmon_id_start,
+					&ch->cs_client);
+	}
+	mutex_unlock(&ch->cs_client_mutex);
+
+	return ret;
+}
+
+static int gk20a_free_cycle_stats_snapshot(struct channel_gk20a *ch)
+{
+	int ret;
+
+	mutex_lock(&ch->cs_client_mutex);
+	if (ch->cs_client) {
+		ret = gr_gk20a_css_detach(ch->g, ch->cs_client);
+		ch->cs_client = NULL;
+	} else {
+		ret = 0;
+	}
+	mutex_unlock(&ch->cs_client_mutex);
+
+	return ret;
+}
+
+static int gk20a_channel_cycle_stats_snapshot(struct channel_gk20a *ch,
+			struct nvgpu_cycle_stats_snapshot_args *args)
+{
+	int ret;
+
+	/* is it allowed to handle calls for current GPU? */
+	if (0 == (ch->g->gpu_characteristics.flags &
+			NVGPU_GPU_FLAGS_SUPPORT_CYCLE_STATS_SNAPSHOT))
+		return -ENOSYS;
+
+	if (!args->dmabuf_fd)
+		return -EINVAL;
+
+	/* handle the command (most frequent cases first) */
+	switch (args->cmd) {
+	case NVGPU_IOCTL_CHANNEL_CYCLE_STATS_SNAPSHOT_CMD_FLUSH:
+		ret = gk20a_flush_cycle_stats_snapshot(ch);
+		args->extra = 0;
+		break;
+
+	case NVGPU_IOCTL_CHANNEL_CYCLE_STATS_SNAPSHOT_CMD_ATTACH:
+		ret = gk20a_attach_cycle_stats_snapshot(ch,
+						args->dmabuf_fd,
+						args->extra,
+						&args->extra);
+		break;
+
+	case NVGPU_IOCTL_CHANNEL_CYCLE_STATS_SNAPSHOT_CMD_DETACH:
+		ret = gk20a_free_cycle_stats_snapshot(ch);
+		args->extra = 0;
+		break;
+
+	default:
+		pr_err("cyclestats: unknown command %u\n", args->cmd);
+		ret = -EINVAL;
+		break;
+	}
+
+	return ret;
+}
 #endif
 
 static int gk20a_init_error_notifier(struct channel_gk20a *ch,
-		struct nvgpu_set_error_notifier *args) {
-	void *va;
-
+		struct nvgpu_set_error_notifier *args)
+{
+	struct device *dev = dev_from_gk20a(ch->g);
 	struct dma_buf *dmabuf;
+	void *va;
+	u64 end = args->offset + sizeof(struct nvgpu_notification);
 
 	if (!args->mem) {
 		pr_err("gk20a_init_error_notifier: invalid memory handle\n");
@@ -532,6 +624,13 @@ static int gk20a_init_error_notifier(struct channel_gk20a *ch,
 		pr_err("Invalid handle: %d\n", args->mem);
 		return -EINVAL;
 	}
+
+	if (end > dmabuf->size || end < sizeof(struct nvgpu_notification)) {
+		dma_buf_put(dmabuf);
+		gk20a_err(dev, "gk20a_init_error_notifier: invalid offset\n");
+		return -EINVAL;
+	}
+
 	/* map handle */
 	va = dma_buf_vmap(dmabuf);
 	if (!va) {
@@ -628,22 +727,20 @@ static void gk20a_wait_until_counter_is_N(
 static void gk20a_free_channel(struct channel_gk20a *ch)
 {
 	struct gk20a *g = ch->g;
-	struct device *d = dev_from_gk20a(g);
 	struct fifo_gk20a *f = &g->fifo;
 	struct gr_gk20a *gr = &g->gr;
 	struct vm_gk20a *ch_vm = ch->vm;
 	unsigned long timeout = gk20a_get_gr_idle_timeout(g);
 	struct dbg_session_gk20a *dbg_s;
-
+	bool was_reset;
 	gk20a_dbg_fn("");
 
 	WARN_ON(ch->g == NULL);
 
 	trace_gk20a_free_channel(ch->hw_chid);
 
-	/* prevent new kickoffs */
-	ch->has_timedout = true;
-	wmb();
+	/* abort channel and remove from runlist */
+	gk20a_disable_channel(ch);
 
 	/* wait until there's only our ref to the channel */
 	gk20a_wait_until_counter_is_N(
@@ -679,22 +776,28 @@ static void gk20a_free_channel(struct channel_gk20a *ch)
 	if (g->fifo.deferred_reset_pending) {
 		gk20a_dbg(gpu_dbg_intr | gpu_dbg_gpu_dbg, "engine reset was"
 			   " deferred, running now");
-		gk20a_fifo_reset_engine(g, g->fifo.deferred_fault_engines);
+		was_reset = mutex_is_locked(&g->fifo.gr_reset_mutex);
+		mutex_lock(&g->fifo.gr_reset_mutex);
+		/* if lock is already taken, a reset is taking place
+		so no need to repeat */
+		if (!was_reset) {
+			gk20a_fifo_reset_engine(g,
+				g->fifo.deferred_fault_engines);
+		}
+		mutex_unlock(&g->fifo.gr_reset_mutex);
 		g->fifo.deferred_fault_engines = 0;
 		g->fifo.deferred_reset_pending = false;
 	}
 	mutex_unlock(&f->deferred_reset_mutex);
 
 	if (!ch->bound)
-		return;
+		goto release;
 
 	if (!gk20a_channel_as_bound(ch))
 		goto unbind;
 
 	gk20a_dbg_info("freeing bound channel context, timeout=%ld",
 			timeout);
-
-	gk20a_disable_channel(ch, !ch->has_timedout, timeout);
 
 	gk20a_free_error_notifiers(ch);
 
@@ -705,29 +808,24 @@ static void gk20a_free_channel(struct channel_gk20a *ch)
 
 	memset(&ch->ramfc, 0, sizeof(struct mem_desc_sub));
 
-	/* free gpfifo */
-	if (ch->gpfifo.gpu_va)
-		gk20a_gmmu_unmap(ch_vm, ch->gpfifo.gpu_va,
-			ch->gpfifo.size, gk20a_mem_flag_none);
-	if (ch->gpfifo.cpu_va)
-		dma_free_coherent(d, ch->gpfifo.size,
-			ch->gpfifo.cpu_va, ch->gpfifo.iova);
-	ch->gpfifo.cpu_va = NULL;
-	ch->gpfifo.iova = 0;
+	gk20a_gmmu_unmap_free(ch_vm, &ch->gpfifo.mem);
 
 	memset(&ch->gpfifo, 0, sizeof(struct gpfifo_desc));
 
 #if defined(CONFIG_GK20A_CYCLE_STATS)
 	gk20a_free_cycle_stats_buffer(ch);
+	gk20a_free_cycle_stats_snapshot(ch);
 #endif
 
 	channel_gk20a_free_priv_cmdbuf(ch);
 
 	/* sync must be destroyed before releasing channel vm */
+	mutex_lock(&ch->sync_lock);
 	if (ch->sync) {
 		ch->sync->destroy(ch->sync);
 		ch->sync = NULL;
 	}
+	mutex_unlock(&ch->sync_lock);
 
 	/* release channel binding to the as_share */
 	if (ch_vm->as_share)
@@ -773,6 +871,7 @@ unbind:
 
 	mutex_unlock(&ch->dbg_s_lock);
 
+release:
 	/* make sure we catch accesses of unopened channels in case
 	 * there's non-refcounted channel pointers hanging around */
 	ch->g = NULL;
@@ -934,6 +1033,7 @@ struct channel_gk20a *gk20a_open_new_channel(struct gk20a *g)
 	ch->timeout_debug_dump = true;
 	ch->has_timedout = false;
 	ch->obj_class = 0;
+	ch->clean_up.scheduled = false;
 
 	/* The channel is *not* runnable at this point. It still needs to have
 	 * an address space bound and allocate a gpfifo and grctx. */
@@ -1049,8 +1149,6 @@ static int channel_gk20a_alloc_priv_cmdbuf(struct channel_gk20a *c)
 	struct priv_cmd_queue *q = &c->priv_cmd_q;
 	u32 size;
 	int err = 0;
-	struct sg_table *sgt;
-	dma_addr_t iova;
 
 	/* Kernel can insert gpfifos before and after user gpfifos.
 	   Before user gpfifos, kernel inserts fence_wait, which takes
@@ -1062,48 +1160,20 @@ static int channel_gk20a_alloc_priv_cmdbuf(struct channel_gk20a *c)
 	   max size of priv_cmdbuf is :
 	   (gpfifo entry number * (2 / 3) * (4 + 6) * 4 bytes */
 	size = roundup_pow_of_two(
-		c->gpfifo.entry_num * 2 * 10 * sizeof(u32) / 3);
+		c->gpfifo.entry_num * 2 * 12 * sizeof(u32) / 3);
 
-	q->mem.base_cpuva = dma_alloc_coherent(d, size,
-					&iova,
-					GFP_KERNEL);
-	if (!q->mem.base_cpuva) {
-		gk20a_err(d, "%s: memory allocation failed\n", __func__);
-		err = -ENOMEM;
-		goto clean_up;
-	}
-
-	q->mem.base_iova = iova;
-	q->mem.size = size;
-
-	err = gk20a_get_sgtable(d, &sgt,
-			q->mem.base_cpuva, q->mem.base_iova, size);
+	err = gk20a_gmmu_alloc_map(ch_vm, size, &q->mem);
 	if (err) {
-		gk20a_err(d, "%s: failed to create sg table\n", __func__);
+		gk20a_err(d, "%s: memory allocation failed\n", __func__);
 		goto clean_up;
-	}
-
-	memset(q->mem.base_cpuva, 0, size);
-
-	q->base_gpuva = gk20a_gmmu_map(ch_vm, &sgt,
-					size,
-					0, /* flags */
-					gk20a_mem_flag_none);
-	if (!q->base_gpuva) {
-		gk20a_err(d, "ch %d : failed to map gpu va"
-			   "for priv cmd buffer", c->hw_chid);
-		err = -ENOMEM;
-		goto clean_up_sgt;
 	}
 
 	q->size = q->mem.size / sizeof (u32);
 
-	gk20a_free_sgtable(&sgt);
+	INIT_LIST_HEAD(&q->free);
 
 	return 0;
 
-clean_up_sgt:
-	gk20a_free_sgtable(&sgt);
 clean_up:
 	channel_gk20a_free_priv_cmdbuf(c);
 	return err;
@@ -1111,21 +1181,22 @@ clean_up:
 
 static void channel_gk20a_free_priv_cmdbuf(struct channel_gk20a *c)
 {
-	struct device *d = dev_from_gk20a(c->g);
 	struct vm_gk20a *ch_vm = c->vm;
 	struct priv_cmd_queue *q = &c->priv_cmd_q;
+	struct priv_cmd_entry *e;
+	struct list_head *pos, *tmp, *head;
 
 	if (q->size == 0)
 		return;
 
-	if (q->base_gpuva)
-		gk20a_gmmu_unmap(ch_vm, q->base_gpuva,
-				q->mem.size, gk20a_mem_flag_none);
-	if (q->mem.base_cpuva)
-		dma_free_coherent(d, q->mem.size,
-			q->mem.base_cpuva, q->mem.base_iova);
-	q->mem.base_cpuva = NULL;
-	q->mem.base_iova = 0;
+	gk20a_gmmu_unmap_free(ch_vm, &q->mem);
+
+	/* free free list */
+	head = &q->free;
+	list_for_each_safe(pos, tmp, head) {
+		e = container_of(pos, struct priv_cmd_entry, list);
+		kfree(e);
+	}
 
 	memset(q, 0, sizeof(struct priv_cmd_queue));
 }
@@ -1156,7 +1227,13 @@ int gk20a_channel_alloc_priv_cmdbuf(struct channel_gk20a *c, u32 orig_size,
 	if (size > free_count)
 		return -EAGAIN;
 
-	e = kzalloc(sizeof(struct priv_cmd_entry), GFP_KERNEL);
+	if (list_empty(&q->free))
+		e = kzalloc(sizeof(struct priv_cmd_entry), GFP_KERNEL);
+	else {
+		e = container_of((&q->free)->next,
+				 struct priv_cmd_entry, list);
+		list_del(&e->list);
+	}
 	if (!e) {
 		gk20a_err(dev_from_gk20a(c->g),
 			"ch %d: fail to allocate priv cmd entry",
@@ -1172,12 +1249,12 @@ int gk20a_channel_alloc_priv_cmdbuf(struct channel_gk20a *c, u32 orig_size,
 	/* if we have increased size to skip free space in the end, set put
 	   to beginning of cmd buffer (0) + size */
 	if (size != orig_size) {
-		e->ptr = q->mem.base_cpuva;
-		e->gva = q->base_gpuva;
+		e->ptr = (u32 *)q->mem.cpu_va;
+		e->gva = q->mem.gpu_va;
 		q->put = orig_size;
 	} else {
-		e->ptr = q->mem.base_cpuva + q->put;
-		e->gva = q->base_gpuva + q->put * sizeof(u32);
+		e->ptr = (u32 *)q->mem.cpu_va + q->put;
+		e->gva = q->mem.gpu_va + q->put * sizeof(u32);
 		q->put = (q->put + orig_size) & (q->size - 1);
 	}
 
@@ -1196,7 +1273,9 @@ int gk20a_channel_alloc_priv_cmdbuf(struct channel_gk20a *c, u32 orig_size,
 static void free_priv_cmdbuf(struct channel_gk20a *c,
 			     struct priv_cmd_entry *e)
 {
-	kfree(e);
+	struct priv_cmd_queue *q = &c->priv_cmd_q;
+
+	list_add(&e->list, &q->free);
 }
 
 int gk20a_alloc_channel_gpfifo(struct channel_gk20a *c,
@@ -1207,8 +1286,6 @@ int gk20a_alloc_channel_gpfifo(struct channel_gk20a *c,
 	struct vm_gk20a *ch_vm;
 	u32 gpfifo_size;
 	int err = 0;
-	struct sg_table *sgt;
-	dma_addr_t iova;
 
 	/* Kernel can insert one extra gpfifo entry before user submitted gpfifos
 	   and another one after, for internal usage. Triple the requested size. */
@@ -1237,53 +1314,29 @@ int gk20a_alloc_channel_gpfifo(struct channel_gk20a *c,
 	c->ramfc.offset = 0;
 	c->ramfc.size = ram_in_ramfc_s() / 8;
 
-	if (c->gpfifo.cpu_va) {
+	if (c->gpfifo.mem.cpu_va) {
 		gk20a_err(d, "channel %d :"
 			   "gpfifo already allocated", c->hw_chid);
 		return -EEXIST;
 	}
 
-	c->gpfifo.size = gpfifo_size * sizeof(struct gpfifo);
-	c->gpfifo.cpu_va = (struct gpfifo *)dma_alloc_coherent(d,
-						c->gpfifo.size,
-						&iova,
-						GFP_KERNEL);
-	if (!c->gpfifo.cpu_va) {
+	err = gk20a_gmmu_alloc_map(ch_vm, gpfifo_size * sizeof(struct gpfifo),
+			&c->gpfifo.mem);
+	if (err) {
 		gk20a_err(d, "%s: memory allocation failed\n", __func__);
-		err = -ENOMEM;
 		goto clean_up;
 	}
 
-	c->gpfifo.iova = iova;
 	c->gpfifo.entry_num = gpfifo_size;
-
 	c->gpfifo.get = c->gpfifo.put = 0;
 
-	err = gk20a_get_sgtable(d, &sgt,
-			c->gpfifo.cpu_va, c->gpfifo.iova, c->gpfifo.size);
-	if (err) {
-		gk20a_err(d, "%s: failed to allocate sg table\n", __func__);
-		goto clean_up;
-	}
-
-	c->gpfifo.gpu_va = gk20a_gmmu_map(ch_vm,
-					&sgt,
-					c->gpfifo.size,
-					0, /* flags */
-					gk20a_mem_flag_none);
-	if (!c->gpfifo.gpu_va) {
-		gk20a_err(d, "channel %d : failed to map"
-			   " gpu_va for gpfifo", c->hw_chid);
-		err = -ENOMEM;
-		goto clean_up_sgt;
-	}
-
 	gk20a_dbg_info("channel %d : gpfifo_base 0x%016llx, size %d",
-		c->hw_chid, c->gpfifo.gpu_va, c->gpfifo.entry_num);
+		c->hw_chid, c->gpfifo.mem.gpu_va, c->gpfifo.entry_num);
 
 	channel_gk20a_setup_userd(c);
 
-	err = g->ops.fifo.setup_ramfc(c, c->gpfifo.gpu_va, c->gpfifo.entry_num);
+	err = g->ops.fifo.setup_ramfc(c, c->gpfifo.mem.gpu_va,
+					c->gpfifo.entry_num, args->flags);
 	if (err)
 		goto clean_up_unmap;
 
@@ -1299,21 +1352,12 @@ int gk20a_alloc_channel_gpfifo(struct channel_gk20a *c,
 
 	g->ops.fifo.bind_channel(c);
 
-	gk20a_free_sgtable(&sgt);
-
 	gk20a_dbg_fn("done");
 	return 0;
 
 clean_up_unmap:
-	gk20a_gmmu_unmap(ch_vm, c->gpfifo.gpu_va,
-		c->gpfifo.size, gk20a_mem_flag_none);
-clean_up_sgt:
-	gk20a_free_sgtable(&sgt);
+	gk20a_gmmu_unmap_free(ch_vm, &c->gpfifo.mem);
 clean_up:
-	dma_free_coherent(d, c->gpfifo.size,
-		c->gpfifo.cpu_va, c->gpfifo.iova);
-	c->gpfifo.cpu_va = NULL;
-	c->gpfifo.iova = 0;
 	memset(&c->gpfifo, 0, sizeof(struct gpfifo_desc));
 	gk20a_err(d, "fail");
 	return err;
@@ -1329,7 +1373,8 @@ static inline bool check_gp_put(struct gk20a *g,
 	if (c->gpfifo.put != put) {
 		/*TBD: BUG_ON/teardown on this*/
 		gk20a_err(dev_from_gk20a(g), "gp_put changed unexpectedly "
-			   "since last update");
+			  "since last update, channel put = %u, ram put = %u\n",
+			  c->gpfifo.put, put);
 		c->gpfifo.put = put;
 		return false; /* surprise! */
 	}
@@ -1371,17 +1416,6 @@ bool gk20a_channel_update_and_check_timeout(struct channel_gk20a *ch,
 
 	return ch->g->timeouts_enabled &&
 		ch->timeout_accumulated_ms > ch->timeout_ms_max;
-}
-
-static u32 gk20a_get_channel_watchdog_timeout(struct channel_gk20a *ch)
-{
-	struct gk20a_platform *platform = gk20a_get_platform(ch->g->dev);
-
-	if (ch->g->timeouts_enabled && ch->g->ch_wdt_enabled &&
-				platform->ch_wdt_timeout_ms)
-		return platform->ch_wdt_timeout_ms;
-	else
-		return (u32)MAX_SCHEDULE_TIMEOUT;
 }
 
 static u32 get_gp_free_count(struct channel_gk20a *c)
@@ -1467,141 +1501,6 @@ static void trace_write_pushbuffer_range(struct channel_gk20a *c,
 		nvgpu_free(g);
 }
 
-static void gk20a_channel_timeout_start(struct channel_gk20a *ch,
-		struct channel_gk20a_job *job)
-{
-	mutex_lock(&ch->timeout.lock);
-
-	if (ch->timeout.initialized) {
-		mutex_unlock(&ch->timeout.lock);
-		return;
-	}
-
-	ch->timeout.job = job;
-	ch->timeout.initialized = true;
-	schedule_delayed_work(&ch->timeout.wq,
-	       msecs_to_jiffies(gk20a_get_channel_watchdog_timeout(ch)));
-
-	mutex_unlock(&ch->timeout.lock);
-}
-
-static void gk20a_channel_timeout_stop(struct channel_gk20a *ch)
-{
-	mutex_lock(&ch->timeout.lock);
-	if (!ch->timeout.initialized) {
-		mutex_unlock(&ch->timeout.lock);
-		return;
-	}
-	mutex_unlock(&ch->timeout.lock);
-
-	cancel_delayed_work_sync(&ch->timeout.wq);
-
-	mutex_lock(&ch->timeout.lock);
-	ch->timeout.initialized = false;
-	mutex_unlock(&ch->timeout.lock);
-}
-
-void gk20a_channel_timeout_restart_all_channels(struct gk20a *g)
-{
-	u32 chid;
-	struct fifo_gk20a *f = &g->fifo;
-
-	for (chid = 0; chid < f->num_channels; chid++) {
-		struct channel_gk20a *ch = &f->channel[chid];
-
-		if (gk20a_channel_get(ch)) {
-			mutex_lock(&ch->timeout.lock);
-			if (!ch->timeout.initialized) {
-				mutex_unlock(&ch->timeout.lock);
-				gk20a_channel_put(ch);
-				continue;
-			}
-			mutex_unlock(&ch->timeout.lock);
-
-			cancel_delayed_work_sync(&ch->timeout.wq);
-			if (!ch->has_timedout)
-				schedule_delayed_work(&ch->timeout.wq,
-				       msecs_to_jiffies(
-				       gk20a_get_channel_watchdog_timeout(ch)));
-
-			gk20a_channel_put(ch);
-		}
-	}
-}
-
-static void gk20a_channel_timeout_handler(struct work_struct *work)
-{
-	struct channel_gk20a_job *job;
-	struct gk20a *g;
-	struct channel_gk20a *ch;
-	struct channel_gk20a *failing_ch;
-	u32 engine_id;
-	int id = -1;
-	bool is_tsg = false;
-
-	ch = container_of(to_delayed_work(work), struct channel_gk20a,
-			timeout.wq);
-	ch = gk20a_channel_get(ch);
-	if (!ch)
-		return;
-
-	g = ch->g;
-
-	/* Need global lock since multiple channels can timeout at a time */
-	mutex_lock(&g->ch_wdt_lock);
-
-	/* Get timed out job and reset the timer */
-	mutex_lock(&ch->timeout.lock);
-	job = ch->timeout.job;
-	ch->timeout.initialized = false;
-	mutex_unlock(&ch->timeout.lock);
-
-	if (gk20a_fifo_disable_all_engine_activity(g, true))
-		goto fail_unlock;
-
-	if (gk20a_fence_is_expired(job->post_fence))
-		goto fail_enable_engine_activity;
-
-	gk20a_err(dev_from_gk20a(g), "Job on channel %d timed out\n",
-		ch->hw_chid);
-
-	/* Get failing engine data */
-	engine_id = gk20a_fifo_get_failing_engine_data(g, &id, &is_tsg);
-
-	if (engine_id >= g->fifo.max_engines) {
-		/* If no failing engine, abort the channels */
-		if (gk20a_is_channel_marked_as_tsg(ch)) {
-			struct tsg_gk20a *tsg = &g->fifo.tsg[ch->tsgid];
-
-			gk20a_fifo_set_ctx_mmu_error_tsg(g, tsg);
-			gk20a_fifo_abort_tsg(g, ch->tsgid);
-		} else {
-			gk20a_fifo_set_ctx_mmu_error_ch(g, ch);
-			gk20a_channel_abort(ch);
-		}
-	} else {
-		/* If failing engine, trigger recovery */
-		failing_ch = gk20a_channel_get(&g->fifo.channel[id]);
-		if (!failing_ch)
-			goto fail_enable_engine_activity;
-
-		if (failing_ch->hw_chid != ch->hw_chid)
-			gk20a_channel_timeout_start(ch, job);
-
-		gk20a_fifo_recover(g, BIT(engine_id),
-			failing_ch->hw_chid, is_tsg,
-			failing_ch->timeout_debug_dump);
-
-		gk20a_channel_put(failing_ch);
-	}
-
-fail_enable_engine_activity:
-	gk20a_fifo_enable_all_engine_activity(g);
-fail_unlock:
-	mutex_unlock(&g->ch_wdt_lock);
-	gk20a_channel_put(ch);
-}
-
 static int gk20a_free_priv_cmdbuf(struct channel_gk20a *c,
 					struct priv_cmd_entry *e)
 {
@@ -1612,14 +1511,40 @@ static int gk20a_free_priv_cmdbuf(struct channel_gk20a *c,
 	if (!e)
 		return 0;
 
-	cmd_entry_start = (u32)(e->ptr - (u32 *)q->mem.base_cpuva);
+	cmd_entry_start = (u32)(e->ptr - (u32 *)q->mem.cpu_va);
 	if ((q->get != cmd_entry_start) && cmd_entry_start != 0)
 		gk20a_err(d, "requests out-of-order, ch=%d\n", c->hw_chid);
 
-	q->get = (e->ptr - (u32 *)q->mem.base_cpuva) + e->size;
+	q->get = (e->ptr - (u32 *)q->mem.cpu_va) + e->size;
 	free_priv_cmdbuf(c, e);
 
 	return 0;
+}
+
+static void gk20a_channel_schedule_job_clean_up(struct channel_gk20a *c)
+{
+	mutex_lock(&c->clean_up.lock);
+
+	if (c->clean_up.scheduled) {
+		mutex_unlock(&c->clean_up.lock);
+		return;
+	}
+
+	c->clean_up.scheduled = true;
+	schedule_delayed_work(&c->clean_up.wq, 1);
+
+	mutex_unlock(&c->clean_up.lock);
+}
+
+void gk20a_channel_cancel_job_clean_up(struct channel_gk20a *c,
+				bool wait_for_completion)
+{
+	if (wait_for_completion)
+		cancel_delayed_work_sync(&c->clean_up.wq);
+
+	mutex_lock(&c->clean_up.lock);
+	c->clean_up.scheduled = false;
+	mutex_unlock(&c->clean_up.lock);
 }
 
 static int gk20a_channel_add_job(struct channel_gk20a *c,
@@ -1664,8 +1589,6 @@ static int gk20a_channel_add_job(struct channel_gk20a *c,
 		job->wait_cmd = wait_cmd;
 		job->incr_cmd = incr_cmd;
 
-		gk20a_channel_timeout_start(c, job);
-
 		mutex_lock(&c->jobs_lock);
 		list_add_tail(&job->list, &c->jobs);
 		mutex_unlock(&c->jobs_lock);
@@ -1676,33 +1599,40 @@ static int gk20a_channel_add_job(struct channel_gk20a *c,
 	return 0;
 }
 
-void gk20a_channel_update(struct channel_gk20a *c, int nr_completed)
+static void gk20a_channel_clean_up_jobs(struct work_struct *work)
 {
-	struct vm_gk20a *vm = c->vm;
+	struct channel_gk20a *c = container_of(to_delayed_work(work),
+			struct channel_gk20a, clean_up.wq);
+	struct vm_gk20a *vm;
 	struct channel_gk20a_job *job, *n;
-	struct gk20a_platform *platform = gk20a_get_platform(c->g->dev);
+	struct gk20a_platform *platform;
 
-	trace_gk20a_channel_update(c->hw_chid);
+	c = gk20a_channel_get(c);
+	if (!c)
+		return;
 
-	update_gp_get(c->g, c);
-	wake_up(&c->submit_wq);
+	if (!c->g->power_on) { /* shutdown case */
+		gk20a_channel_put(c);
+		return;
+	}
+
+	vm = c->vm;
+	platform = gk20a_get_platform(c->g->dev);
 
 	mutex_lock(&c->submit_lock);
 
 	/* gp_put check needs to be done inside submit lock */
 	check_gp_put(c->g, c);
 
+	gk20a_channel_cancel_job_clean_up(c, false);
+
 	mutex_lock(&c->jobs_lock);
 	list_for_each_entry_safe(job, n, &c->jobs, list) {
 		struct gk20a *g = c->g;
 
 		bool completed = gk20a_fence_is_expired(job->post_fence);
-		if (!completed) {
-			gk20a_channel_timeout_start(c, job);
+		if (!completed)
 			break;
-		}
-
-		gk20a_channel_timeout_stop(c);
 
 		if (c->sync)
 			c->sync->signal_timeline(c->sync);
@@ -1739,17 +1669,41 @@ void gk20a_channel_update(struct channel_gk20a *c, int nr_completed)
 	 * the sync resource
 	 */
 	if (list_empty(&c->jobs)) {
+		mutex_lock(&c->sync_lock);
 		if (c->sync && platform->aggressive_sync_destroy &&
 			  gk20a_fence_is_expired(c->last_submit.post_fence)) {
 			c->sync->destroy(c->sync);
 			c->sync = NULL;
 		}
+		mutex_unlock(&c->sync_lock);
 	}
 	mutex_unlock(&c->jobs_lock);
 	mutex_unlock(&c->submit_lock);
 
 	if (c->update_fn)
 		schedule_work(&c->update_fn_work);
+
+	gk20a_channel_put(c);
+}
+
+void gk20a_channel_update(struct channel_gk20a *c, int nr_completed)
+{
+	c = gk20a_channel_get(c);
+	if (!c)
+		return;
+
+	if (!c->g->power_on) { /* shutdown case */
+		gk20a_channel_put(c);
+		return;
+	}
+
+	update_gp_get(c->g, c);
+	wake_up(&c->submit_wq);
+
+	trace_gk20a_channel_update(c->hw_chid);
+	gk20a_channel_schedule_job_clean_up(c);
+
+	gk20a_channel_put(c);
 }
 
 int gk20a_submit_channel_gpfifo(struct channel_gk20a *c,
@@ -1788,8 +1742,11 @@ int gk20a_submit_channel_gpfifo(struct channel_gk20a *c,
 	if (c->has_timedout)
 		return -ETIMEDOUT;
 
-	/* fifo not large enough for request. Return error immediately */
-	if (c->gpfifo.entry_num < num_entries) {
+	/* fifo not large enough for request. Return error immediately.
+	 * Kernel can insert gpfifo entries before and after user gpfifos.
+	 * So, add extra_entries in user request. Also, HW with fifo size N
+	 * can accept only N-1 entreis and so the below condition */
+	if (c->gpfifo.entry_num - 1 < num_entries + extra_entries) {
 		gk20a_err(d, "not enough gpfifo space allocated");
 		return -ENOMEM;
 	}
@@ -1866,6 +1823,7 @@ int gk20a_submit_channel_gpfifo(struct channel_gk20a *c,
 
 	mutex_lock(&c->submit_lock);
 
+	mutex_lock(&c->sync_lock);
 	if (!c->sync) {
 		c->sync = gk20a_channel_sync_create(c);
 		if (!c->sync) {
@@ -1873,7 +1831,12 @@ int gk20a_submit_channel_gpfifo(struct channel_gk20a *c,
 			mutex_unlock(&c->submit_lock);
 			goto clean_up;
 		}
+		if (g->ops.fifo.resetup_ramfc)
+			err = g->ops.fifo.resetup_ramfc(c);
+		if (err)
+			return err;
 	}
+	mutex_unlock(&c->sync_lock);
 
 	/*
 	 * optionally insert syncpt wait in the beginning of gpfifo submission
@@ -1915,9 +1878,9 @@ int gk20a_submit_channel_gpfifo(struct channel_gk20a *c,
 	}
 
 	if (wait_cmd) {
-		c->gpfifo.cpu_va[c->gpfifo.put].entry0 =
+		((struct gpfifo *)(c->gpfifo.mem.cpu_va))[c->gpfifo.put].entry0 =
 			u64_lo32(wait_cmd->gva);
-		c->gpfifo.cpu_va[c->gpfifo.put].entry1 =
+		((struct gpfifo *)(c->gpfifo.mem.cpu_va))[c->gpfifo.put].entry1 =
 			u64_hi32(wait_cmd->gva) |
 			pbdma_gp_entry1_length_f(wait_cmd->size);
 		trace_gk20a_push_cmdbuf(c->g->dev->name,
@@ -1943,19 +1906,22 @@ int gk20a_submit_channel_gpfifo(struct channel_gk20a *c,
 			int length0 = c->gpfifo.entry_num - start;
 			int length1 = num_entries - length0;
 
-			memcpy(c->gpfifo.cpu_va + start, gpfifo,
-			       length0 * sizeof(*gpfifo));
+			memcpy((struct gpfifo *)c->gpfifo.mem.cpu_va + start,
+				gpfifo,
+				length0 * sizeof(*gpfifo));
 
-			memcpy(c->gpfifo.cpu_va, gpfifo + length0,
-			       length1 * sizeof(*gpfifo));
+			memcpy((struct gpfifo *)c->gpfifo.mem.cpu_va,
+				gpfifo + length0,
+				length1 * sizeof(*gpfifo));
 
 			trace_write_pushbuffer_range(c, gpfifo, NULL,
 					0, length0);
 			trace_write_pushbuffer_range(c, gpfifo, NULL,
 					length0, length1);
 		} else {
-			memcpy(c->gpfifo.cpu_va + start, gpfifo,
-			       num_entries * sizeof(*gpfifo));
+			memcpy((struct gpfifo *)c->gpfifo.mem.cpu_va + start,
+				gpfifo,
+				num_entries * sizeof(*gpfifo));
 
 			trace_write_pushbuffer_range(c, gpfifo, NULL,
 					0, num_entries);
@@ -1967,7 +1933,7 @@ int gk20a_submit_channel_gpfifo(struct channel_gk20a *c,
 			int length0 = c->gpfifo.entry_num - start;
 			int length1 = num_entries - length0;
 
-			err = copy_from_user(c->gpfifo.cpu_va + start,
+			err = copy_from_user((struct gpfifo *)c->gpfifo.mem.cpu_va + start,
 				user_gpfifo,
 				length0 * sizeof(*user_gpfifo));
 			if (err) {
@@ -1975,7 +1941,7 @@ int gk20a_submit_channel_gpfifo(struct channel_gk20a *c,
 				goto clean_up;
 			}
 
-			err = copy_from_user(c->gpfifo.cpu_va,
+			err = copy_from_user((struct gpfifo *)c->gpfifo.mem.cpu_va,
 				user_gpfifo + length0,
 				length1 * sizeof(*user_gpfifo));
 			if (err) {
@@ -1988,7 +1954,7 @@ int gk20a_submit_channel_gpfifo(struct channel_gk20a *c,
 			trace_write_pushbuffer_range(c, NULL, args,
 					length0, length1);
 		} else {
-			err = copy_from_user(c->gpfifo.cpu_va + start,
+			err = copy_from_user((struct gpfifo *)c->gpfifo.mem.cpu_va + start,
 				user_gpfifo,
 				num_entries * sizeof(*user_gpfifo));
 			if (err) {
@@ -2005,9 +1971,9 @@ int gk20a_submit_channel_gpfifo(struct channel_gk20a *c,
 		(c->gpfifo.entry_num - 1);
 
 	if (incr_cmd) {
-		c->gpfifo.cpu_va[c->gpfifo.put].entry0 =
+		((struct gpfifo *)(c->gpfifo.mem.cpu_va))[c->gpfifo.put].entry0 =
 			u64_lo32(incr_cmd->gva);
-		c->gpfifo.cpu_va[c->gpfifo.put].entry1 =
+		((struct gpfifo *)(c->gpfifo.mem.cpu_va))[c->gpfifo.put].entry1 =
 			u64_hi32(incr_cmd->gva) |
 			pbdma_gp_entry1_length_f(incr_cmd->size);
 		trace_gk20a_push_cmdbuf(c->g->dev->name,
@@ -2075,11 +2041,13 @@ int gk20a_init_channel_support(struct gk20a *g, u32 chid)
 	mutex_init(&c->ioctl_lock);
 	mutex_init(&c->jobs_lock);
 	mutex_init(&c->submit_lock);
-	mutex_init(&c->timeout.lock);
-	INIT_DELAYED_WORK(&c->timeout.wq, gk20a_channel_timeout_handler);
+	INIT_DELAYED_WORK(&c->clean_up.wq, gk20a_channel_clean_up_jobs);
+	mutex_init(&c->clean_up.lock);
+	mutex_init(&c->sync_lock);
 	INIT_LIST_HEAD(&c->jobs);
 #if defined(CONFIG_GK20A_CYCLE_STATS)
 	mutex_init(&c->cyclestate.cyclestate_buffer_mutex);
+	mutex_init(&c->cs_client_mutex);
 #endif
 	INIT_LIST_HEAD(&c->dbg_s_list);
 	mutex_init(&c->dbg_s_lock);
@@ -2172,6 +2140,7 @@ static int gk20a_channel_wait(struct channel_gk20a *ch,
 	u32 offset;
 	unsigned long timeout;
 	int remain, ret = 0;
+	u64 end;
 
 	gk20a_dbg_fn("");
 
@@ -2187,11 +2156,18 @@ static int gk20a_channel_wait(struct channel_gk20a *ch,
 	case NVGPU_WAIT_TYPE_NOTIFIER:
 		id = args->condition.notifier.dmabuf_fd;
 		offset = args->condition.notifier.offset;
+		end = offset + sizeof(struct notification);
 
 		dmabuf = dma_buf_get(id);
 		if (IS_ERR(dmabuf)) {
 			gk20a_err(d, "invalid notifier nvmap handle 0x%lx",
 				   id);
+			return -EINVAL;
+		}
+
+		if (end > dmabuf->size || end < sizeof(struct notification)) {
+			dma_buf_put(dmabuf);
+			gk20a_err(d, "invalid notifier offset\n");
 			return -EINVAL;
 		}
 
@@ -2427,6 +2403,7 @@ int gk20a_channel_suspend(struct gk20a *g)
 			if (ch->update_fn &&
 					work_pending(&ch->update_fn_work))
 				flush_work(&ch->update_fn_work);
+			gk20a_channel_cancel_job_clean_up(ch, true);
 
 			channels_in_use = true;
 
@@ -2483,6 +2460,7 @@ void gk20a_channel_semaphore_wakeup(struct gk20a *g)
 	for (chid = 0; chid < f->num_channels; chid++) {
 		struct channel_gk20a *c = g->fifo.channel+chid;
 		if (gk20a_channel_get(c)) {
+			gk20a_channel_event(c);
 			wake_up_interruptible_all(&c->semaphore_wq);
 			gk20a_channel_update(c, 0);
 			gk20a_channel_put(c);
@@ -2761,13 +2739,27 @@ long gk20a_channel_ioctl(struct file *filp,
 				__func__, cmd);
 			break;
 		}
-		err = ch->g->ops.fifo.force_reset_ch(ch, true);
+		err = gk20a_fifo_force_reset_ch(ch, true);
 		gk20a_idle(dev);
 		break;
 	case NVGPU_IOCTL_CHANNEL_EVENTS_CTRL:
 		err = gk20a_channel_events_ctrl(ch,
 			   (struct nvgpu_channel_events_ctrl_args *)buf);
 		break;
+#ifdef CONFIG_GK20A_CYCLE_STATS
+	case NVGPU_IOCTL_CHANNEL_CYCLE_STATS_SNAPSHOT:
+		err = gk20a_busy(dev);
+		if (err) {
+			dev_err(&dev->dev,
+				"%s: failed to host gk20a for ioctl cmd: 0x%x",
+				__func__, cmd);
+			break;
+		}
+		err = gk20a_channel_cycle_stats_snapshot(ch,
+				(struct nvgpu_cycle_stats_snapshot_args *)buf);
+		gk20a_idle(dev);
+		break;
+#endif
 	default:
 		dev_dbg(&dev->dev, "unrecognized ioctl cmd: 0x%x", cmd);
 		err = -ENOTTY;

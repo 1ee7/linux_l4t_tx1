@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2013-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -25,6 +25,7 @@
 #include <linux/clk/tegra.h>
 #include <linux/tegra-powergate.h>
 #include <linux/syscore_ops.h>
+#include <linux/tegra_pm_domains.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/of_device.h>
@@ -41,6 +42,20 @@ static DEFINE_SPINLOCK(pcie_pad_lock);
 static DEFINE_SPINLOCK(sata_pad_lock);
 static DEFINE_SPINLOCK(hsic_pad_lock);
 static int hsic_pad_count;
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+static struct of_device_id tegra_xusbb_pd[] = {
+	{ .compatible = "nvidia, tegra210-xusbb-pd", },
+	{ .compatible = "nvidia, tegra132-xusbb-pd", },
+	{ .compatible = "nvidia, tegra124-xusbb-pd", },
+	{},
+};
+static struct of_device_id tegra_xusbc_pd[] = {
+	{ .compatible = "nvidia, tegra210-xusbc-pd", },
+	{ .compatible = "nvidia, tegra132-xusbc-pd", },
+	{ .compatible = "nvidia, tegra124-xusbc-pd", },
+	{},
+};
+#endif
 #endif
 static int utmip_pad_count;
 static struct clk *utmi_pad_clk;
@@ -497,8 +512,22 @@ EXPORT_SYMBOL_GPL(sata_usb_pad_pll_reset_deassert);
 #ifdef CONFIG_ARCH_TEGRA_21x_SOC
 static bool tegra_xusb_partitions_powergated(void)
 {
-	if (!tegra_powergate_is_powered(TEGRA_POWERGATE_XUSBB)
-			&& !tegra_powergate_is_powered(TEGRA_POWERGATE_XUSBC))
+	int partition_id_xusbb, partition_id_xusbc;
+
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	partition_id_xusbb = tegra_pd_get_powergate_id(tegra_xusbb_pd);
+	if (partition_id_xusbb < 0)
+		return -EINVAL;
+
+	partition_id_xusbc = tegra_pd_get_powergate_id(tegra_xusbc_pd);
+	if (partition_id_xusbc < 0)
+		return -EINVAL;
+#else
+	partition_id_xusbb = TEGRA_POWERGATE_XUSBB;
+	partition_id_xusbc = TEGRA_POWERGATE_XUSBC;
+#endif
+	if (!tegra_powergate_is_powered(partition_id_xusbb)
+			&& !tegra_powergate_is_powered(partition_id_xusbc))
 		return true;
 	return false;
 }
@@ -820,8 +849,8 @@ static void get_usb_calib_data(int pad, u32 *hs_curr_level_pad,
 	u32 usb_calib_ext = tegra_fuse_readl(FUSE_USB_CALIB_EXT_0);
 	/* RPD_CTRL			= USB_CALIB_EXT[4:0] */
 
-	pr_info("usb_calib0 = 0x%08x\n", usb_calib0);
-	pr_info("usb_calib_ext = 0x%08x\n", usb_calib_ext);
+	pr_debug("usb_calib0 = 0x%08x\n", usb_calib0);
+	pr_debug("usb_calib_ext = 0x%08x\n", usb_calib_ext);
 
 	*hs_curr_level_pad = (usb_calib0 >>
 		((!pad) ? 0 : ((6 * (pad + 1)) - 1))) & 0x3f;
@@ -1027,17 +1056,17 @@ void xusb_ss_pad_init(int pad, int port_map, u32 cap)
 	/* read and print xusb prod settings for the SS pad */
 	val = readl(pad_base + XUSB_PADCTL_UPHY_USB3_ECTL_2_0(pad));
 	val &= XUSB_PADCTL_UPHY_USB3_ECTL_2_0_RX_CTLE_MASK;
-	pr_info("xusb_prod port%d RX_CTLE = 0x%lx\n", pad, val);
+	pr_debug("xusb_prod port%d RX_CTLE = 0x%lx\n", pad, val);
 
 	val = readl(pad_base + XUSB_PADCTL_UPHY_USB3_ECTL_3_0(pad));
-	pr_info("xusb_prod port%d RX_DFE = 0x%lx\n", pad, val);
+	pr_debug("xusb_prod port%d RX_DFE = 0x%lx\n", pad, val);
 
 	val = readl(pad_base + XUSB_PADCTL_UPHY_USB3_ECTL_4_0(pad));
 	val &= XUSB_PADCTL_UPHY_USB3_ECTL_4_0_RX_CDR_CTRL_MASK;
-	pr_info("xusb_prod port%d RX_CDR_CTRL = 0x%lx\n", pad, val >> 16);
+	pr_debug("xusb_prod port%d RX_CDR_CTRL = 0x%lx\n", pad, val >> 16);
 
 	val = readl(pad_base + XUSB_PADCTL_UPHY_USB3_ECTL_6_0(pad));
-	pr_info("xusb_prod port%d RX_EQ_CTRL_H = 0x%lx\n", pad, val);
+	pr_debug("xusb_prod port%d RX_EQ_CTRL_H = 0x%lx\n", pad, val);
 #endif
 }
 EXPORT_SYMBOL_GPL(xusb_ss_pad_init);
@@ -2053,6 +2082,44 @@ static void tegra_pcie_lane_aux_idle(bool ovdr, int lane)
 	val |= XUSB_PADCTL_UPHY_MISC_PAD_P0_CTL1_AUX_RX_IDLE_TH;
 	writel(val, pad_base + misc_pad_ctl1_regs[lane]);
 }
+
+bool tegra_phy_get_lane_rdet(u8 lane_num)
+{
+	u32 data;
+	void __iomem *pad_base = IO_ADDRESS(TEGRA_XUSB_PADCTL_BASE);
+
+	switch (lane_num) {
+	case 0:
+		data = readl(pad_base + XUSB_PADCTL_UPHY_MISC_PAD_P0_CTL1);
+		data = data &
+			XUSB_PADCTL_UPHY_MISC_PAD_P0_CTL1_AUX_TX_RDET_STATUS;
+		break;
+	case 1:
+		data = readl(pad_base + XUSB_PADCTL_UPHY_MISC_PAD_P1_CTL1);
+		data = data &
+			XUSB_PADCTL_UPHY_MISC_PAD_P1_CTL1_AUX_TX_RDET_STATUS;
+		break;
+	case 2:
+		data = readl(pad_base + XUSB_PADCTL_UPHY_MISC_PAD_P2_CTL1);
+		data = data &
+			XUSB_PADCTL_UPHY_MISC_PAD_P2_CTL1_AUX_TX_RDET_STATUS;
+		break;
+	case 3:
+		data = readl(pad_base + XUSB_PADCTL_UPHY_MISC_PAD_P3_CTL1);
+		data = data &
+			XUSB_PADCTL_UPHY_MISC_PAD_P3_CTL1_AUX_TX_RDET_STATUS;
+		break;
+	case 4:
+		data = readl(pad_base + XUSB_PADCTL_UPHY_MISC_PAD_P4_CTL1);
+		data = data &
+			XUSB_PADCTL_UPHY_MISC_PAD_P4_CTL1_AUX_TX_RDET_STATUS;
+		break;
+	default:
+		return 0;
+	}
+	return !(!data);
+}
+EXPORT_SYMBOL_GPL(tegra_phy_get_lane_rdet);
 #endif
 
 static void tegra_pcie_lane_misc_pad_override(bool ovdr, int lane_owner)
@@ -2316,8 +2383,10 @@ tegra_padctl_disable_uphy_pll(struct platform_device *pdev)
 		pcie_phy_pad_enable(false, padctl->lane_map);
 
 	/* this doesn't assert uphy pll if sequencers are enabled */
-	pex_usb_pad_pll_reset_assert();
-	sata_usb_pad_pll_reset_assert();
+	if (pex_usb_pad_pll_reset_assert())
+		dev_err(&pdev->dev, "fail to assert pex pll\n");
+	if (sata_usb_pad_pll_reset_assert())
+		dev_err(&pdev->dev, "fail to assert sata pll\n");
 }
 
 static int

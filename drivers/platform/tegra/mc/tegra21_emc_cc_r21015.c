@@ -1,7 +1,7 @@
 /*
  * drivers/platform/tegra/tegra21_emc_cc_r21012.c
  *
- * Copyright (c) 2014, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -22,8 +22,8 @@
 /* Select v21015 versions of some functions. */
 #define __TEGRA_EMC_V21015
 
-#include <tegra/tegra21_emc.h>
-#include <tegra/mc-regs-t21x.h>
+#include <linux/platform/tegra/tegra21_emc.h>
+#include <linux/platform/tegra/mc-regs-t21x.h>
 
 #include "iomap.h"
 

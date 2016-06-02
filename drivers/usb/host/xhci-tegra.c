@@ -1,7 +1,7 @@
 /*
  * xhci-tegra.c - Nvidia xHCI host controller driver
  *
- * Copyright (c) 2013-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2013-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -49,7 +49,7 @@
 #include <mach/tegra_usb_pmc.h>
 #include <mach/xusb.h>
 
-#include <tegra/mc.h>
+#include <linux/platform/tegra/mc.h>
 
 #include "xhci-tegra.h"
 #include "xhci.h"
@@ -113,6 +113,22 @@
 #define XUSB_PROD_PREFIX_HSIC	"prod_c_hsic"
 #define XUSB_PROD_PREFIX_SS	"prod_c_ss"
 #define XUSB_PROD_PREFIX_SATA	"prod_c_sata"
+
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+static struct of_device_id tegra_xusba_pd[] = {
+	{ .compatible = "nvidia, tegra210-xusba-pd", },
+	{ .compatible = "nvidia, tegra132-xusba-pd", },
+	{ .compatible = "nvidia, tegra124-xusba-pd", },
+	{},
+};
+
+static struct of_device_id tegra_xusbc_pd[] = {
+	{ .compatible = "nvidia, tegra210-xusbc-pd", },
+	{ .compatible = "nvidia, tegra132-xusbc-pd", },
+	{ .compatible = "nvidia, tegra124-xusbc-pd", },
+	{},
+};
+#endif
 
 /* private data types */
 /* command requests from the firmware */
@@ -240,6 +256,8 @@ MODULE_PARM_DESC(firmware_file, FIRMWARE_FILE_HELP);
 
 /* functions */
 #ifdef CONFIG_TEGRA_EHCI_BOOST_CPU_FREQ
+static unsigned int boost_cpu_freq = CONFIG_TEGRA_EHCI_BOOST_CPU_FREQ;
+module_param(boost_cpu_freq, uint, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(boost_cpu_freq, "CPU frequency (in KHz) to boost");
 
 #define BOOST_PERIOD		(msecs_to_jiffies(2*1000)) /* 2 seconds */
@@ -250,7 +268,7 @@ static void tegra_xusb_boost_cpu_freq_fn(struct work_struct *work)
 					struct tegra_xhci_hcd,
 					boost_cpufreq_work);
 	unsigned long delay = BOOST_PERIOD;
-	s32 cpufreq_hz = tegra->boost_cpu_freq * 1000;
+	s32 cpufreq_hz = boost_cpu_freq * 1000;
 
 	mutex_lock(&tegra->boost_cpufreq_lock);
 
@@ -541,7 +559,7 @@ static void pmc_init(struct tegra_xhci_hcd *tegra)
 
 	for (pad = 0; pad < utmi_pad_count; pad++) {
 		if ((BIT(XUSB_UTMI_INDEX + pad) & tegra->bdata->portmap) ||
-			(pad == tegra->otg_portnum)) {
+			(pad == tegra->hs_otg_portnum)) {
 			dev_dbg(dev, "%s utmi pad %d\n", __func__, pad);
 			pmc = &pmc_data[pad];
 			if (tegra->soc_config->pmc_portmap) {
@@ -606,7 +624,7 @@ static void pmc_setup_wake_detect(struct tegra_xhci_hcd *tegra)
 		}
 	}
 	if (tegra->otg_port_owned) {
-		pad = tegra->otg_portnum;
+		pad = tegra->hs_otg_portnum;
 		pmc = &pmc_data[pad];
 		pmc->port_speed = get_usb2_port_speed(tegra, pad);
 		pmc->pmc_ops->setup_pmc_wake_detect(pmc);
@@ -636,7 +654,7 @@ static void pmc_disable_bus_ctrl(struct tegra_xhci_hcd *tegra)
 		}
 	}
 	if (tegra->otg_port_owned || tegra->otg_port_ownership_changed) {
-		pad = tegra->otg_portnum;
+		pad = tegra->hs_otg_portnum;
 		pmc = &pmc_data[pad];
 		pmc->pmc_ops->disable_pmc_bus_ctrl(pmc, 0);
 	}
@@ -2314,7 +2332,7 @@ tegra_xhci_padctl_portmap_and_caps(struct tegra_xhci_hcd *tegra)
 		usb2_vbus_id_init();
 		xusb_utmi_pad_init(0, USB2_PORT_CAP_OTG(0), false);
 		tegra_xhci_program_utmip_power_lp0_exit(tegra,
-				tegra->otg_portnum);
+				tegra->hs_otg_portnum);
 	}
 
 	for_each_enabled_hsic_pad(pad, tegra) {
@@ -2457,7 +2475,7 @@ static void tegra_xhci_handle_otg_port_change(struct tegra_xhci_hcd *tegra)
 	else
 		xhci_hub_control(xhci->shared_hcd, ClearPortFeature,
 			USB_PORT_FEAT_POWER,
-			tegra->otg_portnum + 1, NULL, 0);
+			tegra->hs_otg_portnum + 1, NULL, 0);
 }
 
 /* This function restores XUSB registers from device context */
@@ -2757,6 +2775,7 @@ static int tegra_xhci_ss_elpg_entry(struct tegra_xhci_hcd *tegra)
 	struct xhci_hcd *xhci = tegra->xhci;
 	u32 ret = 0;
 	u32 host_ports;
+	int partition_id;
 
 	must_have_sync_lock(tegra);
 
@@ -2801,7 +2820,14 @@ static int tegra_xhci_ss_elpg_entry(struct tegra_xhci_hcd *tegra)
 	debug_print_portsc(xhci);
 
 	/* tegra_powergate_partition also does partition reset assert */
-	ret = tegra_powergate_partition(TEGRA_POWERGATE_XUSBA);
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	partition_id = tegra_pd_get_powergate_id(tegra_xusba_pd);
+	if (partition_id < 0)
+		return -EINVAL;
+#else
+	partition_id = TEGRA_POWERGATE_XUSBA;
+#endif
+	ret = tegra_powergate_partition(partition_id);
 	if (ret) {
 		xhci_err(xhci, "%s: could not powergate xusba partition\n",
 				__func__);
@@ -2824,6 +2850,7 @@ static int tegra_xhci_host_elpg_entry(struct tegra_xhci_hcd *tegra)
 	struct xhci_hcd *xhci = tegra->xhci;
 	int host_ports = get_host_controlled_ports(tegra);
 	u32 ret = 0;
+	int partition_id;
 
 	must_have_sync_lock(tegra);
 
@@ -2855,7 +2882,14 @@ static int tegra_xhci_host_elpg_entry(struct tegra_xhci_hcd *tegra)
 		tegra_usb_pmc_reg_read(PMC_UTMIP_UHSIC_SLEEP_CFG_0));
 
 	/* tegra_powergate_partition also does partition reset assert */
-	ret = tegra_powergate_partition(TEGRA_POWERGATE_XUSBC);
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	partition_id = tegra_pd_get_powergate_id(tegra_xusbc_pd);
+	if (partition_id < 0)
+		return -EINVAL;
+#else
+	partition_id = TEGRA_POWERGATE_XUSBC;
+#endif
+	ret = tegra_powergate_partition(partition_id);
 	if (ret) {
 		xhci_err(xhci, "%s: could not unpowergate xusbc partition %d\n",
 			__func__, ret);
@@ -2899,6 +2933,7 @@ static int tegra_xhci_ss_partition_elpg_exit(struct tegra_xhci_hcd *tegra)
 	struct xhci_hcd *xhci = tegra->xhci;
 	int ret = 0;
 	int host_ports = get_host_controlled_ports(tegra);
+	int partition_id;
 
 	must_have_sync_lock(tegra);
 
@@ -2916,7 +2951,14 @@ static int tegra_xhci_ss_partition_elpg_exit(struct tegra_xhci_hcd *tegra)
 		 * tegra_unpowergate_partition also does partition reset
 		 * deassert
 		 */
-		ret = tegra_unpowergate_partition(TEGRA_POWERGATE_XUSBA);
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+		partition_id = tegra_pd_get_powergate_id(tegra_xusba_pd);
+		if (partition_id < 0)
+			return -EINVAL;
+#else
+		partition_id = TEGRA_POWERGATE_XUSBA;
+#endif
+		ret = tegra_unpowergate_partition(partition_id);
 		if (ret) {
 			xhci_err(xhci,
 			"%s: could not unpowergate xusba partition %d\n",
@@ -3179,6 +3221,8 @@ tegra_xhci_host_partition_elpg_exit(struct tegra_xhci_hcd *tegra)
 	struct xhci_hcd *xhci = tegra->xhci;
 	int ret = 0;
 	int pad;
+	int partition_id;
+	u32 usbcmd;
 
 	must_have_sync_lock(tegra);
 
@@ -3227,8 +3271,15 @@ tegra_xhci_host_partition_elpg_exit(struct tegra_xhci_hcd *tegra)
 		}
 	}
 
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	partition_id = tegra_pd_get_powergate_id(tegra_xusbc_pd);
+	if (partition_id < 0)
+		return -EINVAL;
+#else
+	partition_id = TEGRA_POWERGATE_XUSBC;
+#endif
 	/* Clear FLUSH_ENABLE of MC client */
-	tegra_powergate_mc_flush_done(TEGRA_POWERGATE_XUSBC);
+	tegra_powergate_mc_flush_done(partition_id);
 
 	/* set port ownership back to xusb */
 	tegra_xhci_release_port_ownership(tegra, false);
@@ -3237,7 +3288,7 @@ tegra_xhci_host_partition_elpg_exit(struct tegra_xhci_hcd *tegra)
 	 * PWR_UNGATE Host partition. XUSBC
 	 * tegra_unpowergate_partition also does partition reset deassert
 	 */
-	ret = tegra_unpowergate_partition(TEGRA_POWERGATE_XUSBC);
+	ret = tegra_unpowergate_partition(partition_id);
 	if (ret) {
 		xhci_err(xhci, "%s: could not unpowergate xusbc partition %d\n",
 			__func__, ret);
@@ -3302,6 +3353,10 @@ tegra_xhci_host_partition_elpg_exit(struct tegra_xhci_hcd *tegra)
 				__func__, ret);
 		goto out;
 	}
+
+	usbcmd = xhci_readl(xhci, &xhci->op_regs->command);
+	usbcmd |= CMD_EIE;
+	xhci_writel(xhci, usbcmd, &xhci->op_regs->command);
 
 	update_remote_wakeup_ports(tegra);
 
@@ -3776,6 +3831,10 @@ static int tegra_xhci_bus_suspend(struct usb_hcd *hcd)
 	int err = 0;
 	u32 host_ports = get_host_controlled_ports(tegra);
 	unsigned long flags;
+	int num_ports = HCS_MAX_PORTS(xhci->hcs_params1);
+	u32 usbcmd;
+	int i;
+	u32 portsc;
 
 	mutex_lock(&tegra->sync_lock);
 
@@ -3806,6 +3865,27 @@ static int tegra_xhci_bus_suspend(struct usb_hcd *hcd)
 
 	if (!(tegra->usb2_rh_suspend && tegra->usb3_rh_suspend))
 		goto done; /* one of the root hubs is still working */
+
+	spin_lock_irqsave(&xhci->lock, flags);
+	usbcmd = xhci_readl(xhci, &xhci->op_regs->command);
+	usbcmd &= ~CMD_EIE;
+	xhci_writel(xhci, usbcmd, &xhci->op_regs->command);
+	for (i = 0; i < num_ports; i++) {
+		portsc = xhci_read_portsc(xhci, i);
+		if ((portsc & PORT_PE) && (portsc & PORT_PLS_MASK) != XDEV_U3) {
+			usbcmd = xhci_readl(xhci, &xhci->op_regs->command);
+			usbcmd |= CMD_EIE;
+			xhci_writel(xhci, usbcmd, &xhci->op_regs->command);
+
+			spin_unlock_irqrestore(&xhci->lock, flags);
+
+			xhci_info(xhci, "%s: port not in suspended state\n",
+				__func__);
+			err = -EBUSY;
+			goto xhci_bus_suspend_failed;
+		}
+	}
+	spin_unlock_irqrestore(&xhci->lock, flags);
 
 	spin_lock_irqsave(&tegra->lock, flags);
 	tegra->hc_in_elpg = true;
@@ -4164,16 +4244,16 @@ static void tegra_xhci_reset_otg_sspi_work(struct work_struct *work)
 	/* set PP=0 */
 	xhci_hub_control(xhci->shared_hcd, ClearPortFeature,
 		USB_PORT_FEAT_POWER,
-		tegra->otg_portnum + 1, NULL, 0);
+		tegra->ss_otg_portnum + 1, NULL, 0);
 
 	/* reset OTG port SSPI */
 	ack_fw_message_send_sync(tegra, MBOX_CMD_RESET_SSPI,
-			tegra->otg_portnum + 1);
+			tegra->ss_otg_portnum + 1);
 
 	/* set PP=1 */
 	xhci_hub_control(xhci->shared_hcd, SetPortFeature,
 		USB_PORT_FEAT_POWER,
-		tegra->otg_portnum + 1, NULL, 0);
+		tegra->ss_otg_portnum + 1, NULL, 0);
 }
 
 static int tegra_xhci_hcd_reinit(struct usb_hcd *hcd)
@@ -4189,6 +4269,18 @@ static int tegra_xhci_hcd_reinit(struct usb_hcd *hcd)
 	}
 	return 0;
 }
+
+#ifdef CONFIG_NV_GAMEPAD_RESET
+static void tegra_loki_gamepad_reset(void)
+{
+	struct device_node *np = of_find_node_by_name(NULL, "gamepad-reset");
+
+	if (np) {
+		if (of_device_is_available(np))
+			gamepad_reset_war();
+	}
+}
+#endif
 
 static const struct hc_driver tegra_plat_xhci_driver = {
 	.description =		"tegra-xhci",
@@ -4244,6 +4336,10 @@ static const struct hc_driver tegra_plat_xhci_driver = {
 	.enable_usb3_lpm_timeout =	xhci_enable_usb3_lpm_timeout,
 	.disable_usb3_lpm_timeout =	xhci_disable_usb3_lpm_timeout,
 	.hcd_reinit =	tegra_xhci_hcd_reinit,
+
+#ifdef CONFIG_NV_GAMEPAD_RESET
+	.device_reset =	tegra_loki_gamepad_reset,
+#endif
 };
 
 #ifdef CONFIG_PM
@@ -4838,8 +4934,6 @@ static void tegra_xusb_read_board_data(struct tegra_xhci_hcd *tegra)
 					sizeof(bdata->hsic[0]));
 	ret = of_property_read_string(node, "nvidia,firmware_file",
 					&bdata->firmware_file_dt);
-	ret = of_property_read_u32(node, "nvidia,boost_cpu_frequency",
-					&tegra->boost_cpu_freq);
 	ret = of_property_read_u32(node, "nvidia,boost_cpu_trigger",
 					&tegra->boost_cpu_trigger);
 
@@ -5163,6 +5257,7 @@ static int tegra_xhci_probe(struct platform_device *pdev)
 #if defined(CONFIG_ARCH_TEGRA_21x_SOC)
 	u32 port;
 #endif
+	int partition_id_xusba, partition_id_xusbc;
 
 	if (tegra_platform_is_fpga())
 		xusb_tegra_program_registers();
@@ -5226,7 +5321,6 @@ static int tegra_xhci_probe(struct platform_device *pdev)
 	}
 
 	if (!tegra->bdata->portmap) {
-		kfree(tegra->bdata->vbus_en_oc);
 		pr_info("%s doesn't have any port enabled\n", __func__);
 		return -ENODEV;
 	}
@@ -5237,10 +5331,10 @@ static int tegra_xhci_probe(struct platform_device *pdev)
 	tegra->hs_wake_event = false;
 	tegra->host_resume_req = false;
 	tegra->lp0_exit = false;
-	if (!tegra->boost_cpu_freq)
-		tegra->boost_cpu_freq = CONFIG_TEGRA_EHCI_BOOST_CPU_FREQ;
+
 	if (!tegra->boost_cpu_trigger)
 		tegra->boost_cpu_trigger = BOOST_TRIGGER;
+
 	/* request resource padctl base address */
 	ret = tegra_xhci_request_mem_region(pdev, 3, &tegra->padctl_base);
 	if (ret) {
@@ -5268,7 +5362,14 @@ static int tegra_xhci_probe(struct platform_device *pdev)
 
 	for (pad = 0; pad < tegra->soc_config->utmi_pad_count; pad++) {
 		if (BIT(XUSB_UTMI_INDEX + pad) & tegra->bdata->otg_portmap) {
-			tegra->otg_portnum = pad;
+			tegra->hs_otg_portnum = pad;
+			break;
+		}
+	}
+
+	for (pad = 0; pad < tegra->soc_config->ss_pad_count; pad++) {
+		if (BIT(pad) & tegra->bdata->otg_portmap) {
+			tegra->ss_otg_portnum = pad;
 			break;
 		}
 	}
@@ -5293,13 +5394,25 @@ static int tegra_xhci_probe(struct platform_device *pdev)
 		goto err_deinit_tegra_xusb_regulator;
 	}
 
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+	partition_id_xusba = tegra_pd_get_powergate_id(tegra_xusba_pd);
+	if (partition_id_xusba < 0)
+		return -EINVAL;
+
+	partition_id_xusbc = tegra_pd_get_powergate_id(tegra_xusbc_pd);
+	if (partition_id_xusbc < 0)
+		return -EINVAL;
+#else
+	partition_id_xusba = TEGRA_POWERGATE_XUSBA;
+	partition_id_xusbc = TEGRA_POWERGATE_XUSBC;
+#endif
 	/* tegra_unpowergate_partition also does partition reset deassert */
-	ret = tegra_unpowergate_partition(TEGRA_POWERGATE_XUSBA);
+	ret = tegra_unpowergate_partition(partition_id_xusba);
 	if (ret)
 		dev_err(&pdev->dev, "could not unpowergate xusba partition\n");
 
 	/* tegra_unpowergate_partition also does partition reset deassert */
-	ret = tegra_unpowergate_partition(TEGRA_POWERGATE_XUSBC);
+	ret = tegra_unpowergate_partition(partition_id_xusbc);
 	if (ret)
 		dev_err(&pdev->dev, "could not unpowergate xusbc partition\n");
 
@@ -5616,9 +5729,11 @@ static int tegra_xhci_probe2(struct tegra_xhci_hcd *tegra)
 
 	/* For otg port, init PortSc.PP to off. */
 	if (tegra->bdata->otg_portmap & 0xff) {
-		portsc = xhci_readl(xhci, xhci->usb3_ports[tegra->otg_portnum]);
+		portsc = xhci_readl(xhci,
+				xhci->usb3_ports[tegra->ss_otg_portnum]);
 		portsc &= ~PORT_POWER;
-		xhci_writel(xhci, portsc, xhci->usb3_ports[tegra->otg_portnum]);
+		xhci_writel(xhci, portsc,
+				xhci->usb3_ports[tegra->ss_otg_portnum]);
 	}
 
 	if (!IS_ERR_OR_NULL(tegra->transceiver)) {
@@ -5651,6 +5766,7 @@ static int tegra_xhci_remove(struct platform_device *pdev)
 #if defined(CONFIG_ARCH_TEGRA_21x_SOC)
 	u32 port;
 #endif
+	int partition_id_xusba, partition_id_xusbc;
 
 	if (tegra == NULL)
 		return -EINVAL;
@@ -5722,8 +5838,20 @@ static int tegra_xhci_remove(struct platform_device *pdev)
 	}
 
 	if (!tegra->hc_in_elpg) {
-		tegra_powergate_partition(TEGRA_POWERGATE_XUSBA);
-		tegra_powergate_partition(TEGRA_POWERGATE_XUSBC);
+#ifdef CONFIG_PM_GENERIC_DOMAINS_OF
+		partition_id_xusba = tegra_pd_get_powergate_id(tegra_xusba_pd);
+		if (partition_id_xusba < 0)
+			return -EINVAL;
+
+		partition_id_xusbc = tegra_pd_get_powergate_id(tegra_xusbc_pd);
+		if (partition_id_xusbc < 0)
+			return -EINVAL;
+#else
+		partition_id_xusba = TEGRA_POWERGATE_XUSBA;
+		partition_id_xusbc = TEGRA_POWERGATE_XUSBC;
+#endif
+		tegra_powergate_partition(partition_id_xusba);
+		tegra_powergate_partition(partition_id_xusbc);
 	}
 
 	tegra_xusb_regulator_deinit(tegra);
@@ -5804,5 +5932,9 @@ static void xhci_reinit_work(struct work_struct *work)
 		tegra_xhci_unregister_plat();
 		usleep_range(10, 20);
 		tegra_xhci_register_plat();
+#ifdef CONFIG_NV_GAMEPAD_RESET
+		udelay(10);
+		tegra_loki_gamepad_reset();
+#endif
 	}
 }

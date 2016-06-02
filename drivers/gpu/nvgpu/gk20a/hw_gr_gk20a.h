@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -181,6 +181,10 @@ static inline u32 gr_exception_gpc_m(void)
 static inline u32 gr_exception_memfmt_m(void)
 {
 	return 0x1 << 1;
+}
+static inline u32 gr_exception_ds_m(void)
+{
+	return 0x1 << 4;
 }
 static inline u32 gr_exception1_r(void)
 {
@@ -865,6 +869,10 @@ static inline u32 gr_fecs_method_push_adr_discover_image_size_v(void)
 static inline u32 gr_fecs_method_push_adr_wfi_golden_save_v(void)
 {
 	return 0x00000009;
+}
+static inline u32 gr_fecs_method_push_adr_wfi_v(void)
+{
+	return 0x0000000b;
 }
 static inline u32 gr_fecs_method_push_adr_restore_golden_v(void)
 {

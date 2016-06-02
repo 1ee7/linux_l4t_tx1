@@ -1,7 +1,7 @@
 /*
  * tegra210-hawkeye-p2290-common.dtsi: Hawkeye common dtsi.
  *
- * Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -25,6 +25,7 @@
 
 #include "tegra210-platforms/tegra210-prods.dtsi"
 #include "tegra210-platforms/tegra210-hawkeye-pinmux-p2290-1100-a00.dtsi"
+#include "tegra210-platforms/tegra210-pinmux-drive-sdmmc-common.dtsi"
 #include "tegra210-platforms/tegra210-hawkeye-pinmux-manual-p2290-1100-a00.dtsi"
 #include "tegra210-platforms/tegra210-hawkeye-power-tree-p2290-1100-a00.dtsi"
 #include "tegra210-platforms/tegra210-ers-keys-e2220-1170-a00.dtsi"
@@ -49,6 +50,7 @@
 #include "tegra210-platforms/tegra210-hawkeye-powermon.dtsi"
 #include "tegra210-platforms/tegra210-hawkeye-e-prods.dtsi"
 #include "tegra210-platforms/tegra210-hawkeye-thermal-zone-p2290-1100-a00.dtsi"
+#include "tegra210-platforms/tegra210-hawkeye-cpufreq.dtsi"
 
 /* TODO: comm's dtsi should be included after GPIO dtsi */
 #include "tegra210-platforms/tegra210-hawkeye-comms.dtsi"
@@ -67,6 +69,14 @@
 		fastboot-instructions = "Press <Power> to select, <Volume Up/Down> for selection move\n";
 		long-press-power-key-on-time = <2>;
 		bootloader-orientation-support;
+		no-tnid-sn;
+	};
+
+	firmware {
+		android {
+			compatible = "android,firmware";
+			hardware = "he2290";
+		};
 	};
 
 	gpio@6000d000 {
@@ -113,6 +123,8 @@
 
 	serial@70006200 {
 		compatible = "nvidia,tegra114-hsuart";
+		dma-names = "tx";
+		nvidia,adjust-baud-rates = <921600 (100)>;
 		status = "okay";
 	};
 
@@ -126,10 +138,6 @@
 		home {
 			status = "disabled";
 		};
-	};
-
-	i2c@546c0000 {
-		avdd_dsi_csi-supply = <&mipi_1v2>;
 	};
 
 	i2c@7000c400 {
@@ -263,7 +271,7 @@
 			bl-name = "pwm-backlight"; /* Match liblights naming expectations */
 			init-brt = /bits/ 8 <0xFF>; /* Max brightness */
 			dev-ctrl = /bits/ 8 <0x80>; /* PWM, enable standby mode */
-			pwm-period = <29334>;
+			pwm-period = <45000>;
 
 			pwm-names = "lp8557";
 			pwms = <&tegra_pwm 0 29334>;
@@ -482,6 +490,7 @@
 			bclk_ratio = <0>;
 			srate = <48000>;
 			num-channel = <2>;
+			ignore_suspend;
 			name-prefix = "x";
 		};
 		nvidia,dai-link-2 {
@@ -498,6 +507,7 @@
 			bit-format = "s16_le";
 			bclk_ratio = <4>;
 			srate = <8000>;
+			ignore_suspend;
 			num-channel = <1>;
 			name-prefix = "y";
 		};
@@ -515,6 +525,7 @@
 			bit-format = "s16_le";
 			bclk_ratio = <0>;
 			srate = <48000>;
+			ignore_suspend;
 			num-channel = <2>;
 			name-prefix = "z";
 		};
@@ -533,6 +544,7 @@
                         bclk_ratio = <0>;
                         srate = <48000>;
                         num-channel = <2>;
+                        ignore_suspend;
                         name-prefix = "k";
                 };
 	};
@@ -621,24 +633,24 @@
 			widget-name = "MP3-DEC1";
 		};
 		plugin-info-2 {
-			plugin-name = "mp3-dec2";
-			firmware-name = "nvmp3dec.elf";
-			widget-name = "MP3-DEC2";
-		};
-		plugin-info-3 {
 			plugin-name = "spkprot";
 			firmware-name = "nvspkprot.elf";
 			widget-name = "SPKPROT-SW";
 		};
-		plugin-info-4 {
+		plugin-info-3 {
 			plugin-name = "src";
 			firmware-name = "nvsrc.elf";
 			widget-name = "SRC";
 		};
-		plugin-info-5 {
+		plugin-info-4 {
 			plugin-name = "aac-dec1";
 			firmware-name = "nvaacdec.elf";
 			widget-name = "AAC-DEC1";
+		};
+		plugin-info-5 {
+			plugin-name = "aec";
+			firmware-name = "libnvaecfx.elf";
+			widget-name = "AEC";
 		};
 	};
 
@@ -1082,17 +1094,7 @@
 		};
 	};
 
-	therm_est_sensor {
-		subdev {
-			coeff_set@0 {
-				toffset = <3224>;
-				coeffs = <
-					4 (-2) (-2) (-2) (-1) (-2) (-1) (-1) (-2) (-2) (-1) (-1) (-1) 0 0 (-1) (-1) (-2) (-5) (-13)
-					17 7 6 6 4 4 4 3 4 4 4 4 3 4 5 5 8 9 10 11
-				>;
-			};
-		};
-	};
+
 
 	sysedp-dynamic-capping {
 		compatible = "nvidia,tegra124-sysedp-dynamic-capping";
@@ -1216,13 +1218,14 @@
 				nvidia,panel-bl-pwm-gpio = <&gpio TEGRA_GPIO(V, 0) 0>; /* PV0 */
 				nvidia,panel-en-gpio = <&gpio TEGRA_GPIO(V, 1) 0>; /* PV1 */
 				nvidia,dsi-refresh-rate = <75>;
-				nvidia,bl-name = "pwm-backlight";	/*backlight used with this panel*/
 				disp-default-out {
 					nvidia,out-rotation = <180>;
 				};
 				vrr-settings {
 					nvidia,vrr_min_fps = <30>;
 					nvidia,frame_len_fluct = <6667>;
+					nvidia,db_correct_cap = <4000>;
+					nvidia,db_hist_cap = <75000>;
 				};
 				display-timings {
 					1200x1920-32-75Hz {
@@ -1241,6 +1244,15 @@
 				};
 			};
 		};
+		sor1 {
+			hdmi-display {
+				nvidia,hdmi-vrr-caps = <1>;
+			};
+		};
+		i2c@546c0000 {
+			avdd_dsi_csi-supply = <&mipi_1v2>;
+			status = "okay";
+		};
 	};
 
 	soctherm@0x700E2000 {
@@ -1251,11 +1263,6 @@
 			enable-hw-pllx-offsetting;
 		};
 	};
-	rollback-protection {
-		device-name = "sdmmc";
-		device-method = <0x1 0x00000002>;  /* type (0x1 = ioctl), argument */
-		status = "okay";
-        };
 
 	i2c@7000d000 {
 		clock-frequency = <1000000>;
@@ -1271,6 +1278,12 @@
 		};
 	};
 
+	rollback-protection {
+		device-name = "sdmmc";
+		device-method = <0x1 0x00000002>;  /* type (0x1 = ioctl), argument */
+		status = "okay";
+        };
+
 	pinmux@700008d4 {
 		prod-settings {
 			i2c0_prod {
@@ -1279,6 +1292,14 @@
 					0 0xD8 0xFE0E0FFF 0x00006000
 					1 0xBC 0xFFFFEEFF 0x00000000
 					1 0xC0 0xFFFFEEFF 0x00000000>;
+			};
+
+			i2c1_prod {
+				nvidia,prod-boot-init;
+				prod = <0 0xDC 0xFE0E0FFF 0x00000000
+					0 0xE0 0xFE0E0FFF 0x00000000
+					1 0xC4 0xFFFFEEFF 0x00000100
+					1 0xC8 0xFFFFEEFF 0x00000100>;
 			};
 
                         i2c2_prod {
@@ -1315,18 +1336,17 @@
 		};
 	};
 
-	i2c@7000c700 {
-		nvidia,high_clock_count = <4>;
-		nvidia,clk_div_std_fast_mode = <0x14>;
-	};
-
-	i2c@7000c400 {
-		nvidia,high_clock_count = <4>;
-		nvidia,clk_div_std_fast_mode = <0x14>;
-	};
-
 	spi@7000da00 {
 		pinctrl-names = "interface-enable";
 		pinctrl-0 = <&spi4_en_interface>;
+	};
+
+	ehci@7d004000 {
+		avdd_usb-supply = <&vdd_3v3>;
+		vddio_hsic-supply = <&max77620_ldo0>;
+	};
+
+	watchdog@60005100 {
+		nvidia,extend-watchdog-suspend;
 	};
 };

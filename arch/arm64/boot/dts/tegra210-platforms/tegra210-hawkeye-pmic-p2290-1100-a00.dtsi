@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,6 +20,7 @@
 #include <dt-bindings/gpio/tegra-gpio.h>
 #include <dt-bindings/thermal/thermal.h>
 #include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/iio/meter/ina3221x.h>
 
 / {
 	i2c@7000d000 {
@@ -147,7 +148,7 @@
 			};
 
 			watchdog {
-				maxim,wdt-boot-timeout = <32>;
+				maxim,wdt-boot-timeout = <0>;
 				maxim,wdt-suspend-timeout = <120>;
 				status = "disabled";
 			};
@@ -157,13 +158,13 @@
 				#size-cells = <0>;
 				fps@0 {
 					reg = <0>;
-					maxim,fps-time-period = <5120>;
+					maxim,fps-time-period = <2560>;
 					maxim,fps-enable-input = <FPS_EN_SRC_EN0>;
 				};
 
 				fps@1 {
 					reg = <1>;
-					maxim,fps-time-period = <5120>;
+					maxim,fps-time-period = <2560>;
 					maxim,fps-enable-input = <FPS_EN_SRC_EN1>;
 					maxim,enable-sleep;
 				};
@@ -365,7 +366,7 @@
 			reg = <0x3e>;
 			compatible = "ti,tps65132";
 			status = "okay";
-			tps65132_outp: outp {
+			outp {
 				regulator-name = "outp";
 				regulator-min-microvolt = <4000000>;
 				regulator-max-microvolt = <6000000>;
@@ -374,7 +375,7 @@
 				ti,disable-active-discharge;
 			};
 
-			tps65132_outn: outn {
+			outn {
 				regulator-name = "outn";
 				regulator-min-microvolt = <4000000>;
 				regulator-max-microvolt = <6000000>;
@@ -438,6 +439,8 @@
 			ti,qmax-cell = <16384>;
 			ti,reserve-cap-mah = <200>;
 			ti,tz-name = "Battery";
+			io-channels = <&ina3221x INA3221_CHAN_INDEX(0, CURRENT, NORMAL)>;
+			io-channel-names = "battery-current";
 		};
 	};
 

@@ -159,9 +159,9 @@ struct sdhci_host {
 #define SDHCI_QUIRK2_NON_STD_TUN_CARD_CLOCK		(1<<13)
 #define SDHCI_QUIRK2_NON_STD_TUNING_LOOP_CNTR		(1<<14)
 #define SDHCI_QUIRK2_NON_STD_RTPM			(1<<15)
+#define SDHCI_QUIRK2_PERIODIC_CALIBRATION		(1<<16)
 /*Controller skips tuning if it is already done*/
-#define SDHCI_QUIRK2_SKIP_TUNING			(1<<16)
-#define SDHCI_QUIRK2_PERIODIC_CALIBRATION		(1<<17)
+#define SDHCI_QUIRK2_SKIP_TUNING			(1<<17)
 
 	unsigned int  acmd12_ctrl;
 	unsigned int  ier;
@@ -209,7 +209,6 @@ struct sdhci_host {
 	u8 pwr;			/* Current voltage */
 
 	bool runtime_suspended;	/* Host is runtime suspended */
-	bool detect_resume;     /* Detect card during resume */
 
 	struct mmc_request *mrq_cmd;	/* Current request */
 	struct mmc_request *mrq_dat;	/* Current request with data*/

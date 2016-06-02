@@ -2,7 +2,7 @@
  * tegra210_adsp_alt.c - Tegra ADSP audio driver
  *
  * Author: Sumit Bhattacharya <sumitb@nvidia.com>
- * Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -568,9 +568,11 @@ static int tegra210_adsp_app_init(struct tegra210_adsp *adsp,
 	}
 
 	app->info = nvadsp_app_init(app->desc->handle, NULL);
-	if (!app->info) {
-		dev_err(adsp->dev, "Failed to init app %s(%s).",
-			app->desc->name, app->desc->fw_name);
+	if (IS_ERR_OR_NULL(app->info)) {
+		dev_err(adsp->dev, "Failed to init app %s(%s),"
+			"nvadsp_app_init() returned with error %ld",
+			app->desc->name, app->desc->fw_name, PTR_ERR(app->info));
+		app->info = NULL;
 		return -ENODEV;
 	}
 
@@ -1642,6 +1644,7 @@ static int tegra210_adsp_admaif_hw_params(struct snd_pcm_substream *substream,
 	return 0;
 }
 
+#ifdef CONFIG_PM_RUNTIME
 static int tegra210_adsp_runtime_suspend(struct device *dev)
 {
 	struct tegra210_adsp *adsp = dev_get_drvdata(dev);
@@ -1681,6 +1684,7 @@ static int tegra210_adsp_runtime_resume(struct device *dev)
 
 	return ret;
 }
+#endif
 
 /* ADSP platform driver read/write call-back */
 static unsigned int tegra210_adsp_read(struct snd_soc_platform *platform,
@@ -1887,16 +1891,33 @@ static struct snd_soc_dai_ops tegra210_adsp_admaif_dai_ops = {
 
 static struct snd_soc_dai_driver tegra210_adsp_dai[] = {
 	{
-		.name = "ADSP PCM",
+		.name = "ADSP PCM1",
 		.playback = {
-			.stream_name = "ADSP PCM Receive",
+			.stream_name = "ADSP PCM1 Receive",
 			.channels_min = 1,
 			.channels_max = 2,
 			.rates = SNDRV_PCM_RATE_8000_48000,
 			.formats = SNDRV_PCM_FMTBIT_S16_LE,
 		},
 		.capture = {
-			.stream_name = "ADSP PCM Transmit",
+			.stream_name = "ADSP PCM1 Transmit",
+			.channels_min = 1,
+			.channels_max = 2,
+			.rates = SNDRV_PCM_RATE_8000_48000,
+			.formats = SNDRV_PCM_FMTBIT_S16_LE,
+		},
+	},
+	{
+		.name = "ADSP PCM2",
+		.playback = {
+			.stream_name = "ADSP PCM2 Receive",
+			.channels_min = 1,
+			.channels_max = 2,
+			.rates = SNDRV_PCM_RATE_8000_48000,
+			.formats = SNDRV_PCM_FMTBIT_S16_LE,
+		},
+		.capture = {
+			.stream_name = "ADSP PCM2 Transmit",
 			.channels_min = 1,
 			.channels_max = 2,
 			.rates = SNDRV_PCM_RATE_8000_48000,
@@ -2513,6 +2534,13 @@ static int tegra210_adsp_apm_put(struct snd_kcontrol *kcontrol,
 		return 0;
 	}
 
+	/* Controls here may execute whether or not APM is initialized */
+	if (strstr(kcontrol->id.name, "Min ADSP Clock")) {
+		app->min_adsp_clock = ucontrol->value.integer.value[0];
+		return 0;
+	}
+
+	/* Check for APM initialized */
 	if (!app->plugin) {
 		dev_warn(adsp->dev, "APM not yet initialized\n");
 		return 0;
@@ -2534,8 +2562,6 @@ static int tegra210_adsp_apm_put(struct snd_kcontrol *kcontrol,
 				TEGRA210_ADSP_MSG_FLAG_SEND);
 		pm_runtime_put(adsp->dev);
 		app->priority = ucontrol->value.integer.value[0];
-	} else if (strstr(kcontrol->id.name, "Min ADSP Clock")) {
-		app->min_adsp_clock = ucontrol->value.integer.value[0];
 	}
 
 	return ret;
@@ -2594,6 +2620,26 @@ static const struct snd_kcontrol_new tegra210_adsp_controls[] = {
 		TEGRA210_ADSP_PLUGIN9),
 	SND_SOC_PARAM_EXT("PLUGIN10 set params",
 		TEGRA210_ADSP_PLUGIN10),
+	SND_SOC_PARAM_EXT("ADMA1 set params",
+		TEGRA210_ADSP_PLUGIN_ADMA1),
+	SND_SOC_PARAM_EXT("ADMA2 set params",
+		TEGRA210_ADSP_PLUGIN_ADMA2),
+	SND_SOC_PARAM_EXT("ADMA3 set params",
+		TEGRA210_ADSP_PLUGIN_ADMA3),
+	SND_SOC_PARAM_EXT("ADMA4 set params",
+		TEGRA210_ADSP_PLUGIN_ADMA4),
+	SND_SOC_PARAM_EXT("ADMA5 set params",
+		TEGRA210_ADSP_PLUGIN_ADMA5),
+	SND_SOC_PARAM_EXT("ADMA6 set params",
+		TEGRA210_ADSP_PLUGIN_ADMA6),
+	SND_SOC_PARAM_EXT("ADMA7 set params",
+		TEGRA210_ADSP_PLUGIN_ADMA7),
+	SND_SOC_PARAM_EXT("ADMA8 set params",
+		TEGRA210_ADSP_PLUGIN_ADMA8),
+	SND_SOC_PARAM_EXT("ADMA9 set params",
+		TEGRA210_ADSP_PLUGIN_ADMA9),
+	SND_SOC_PARAM_EXT("ADMA10 set params",
+		TEGRA210_ADSP_PLUGIN_ADMA10),
 	APM_CONTROL("Priority", APM_PRIORITY_MAX),
 	APM_CONTROL("Min ADSP Clock", INT_MAX),
 };

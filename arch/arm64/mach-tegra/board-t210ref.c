@@ -1,7 +1,7 @@
  /*
  * arch/arm64/mach-tegra/board-t210ref.c
  *
- * Copyright (c) 2013-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2013-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -69,6 +69,7 @@
 #include <linux/tegra_nvadsp.h>
 #include <linux/tegra-pm.h>
 #include <linux/regulator/machine.h>
+#include <linux/of_fdt.h>
 
 #include <mach/irqs.h>
 #include <mach/io_dpd.h>
@@ -103,11 +104,6 @@
 
 static struct tegra_usb_platform_data tegra_udc_pdata;
 static struct tegra_usb_otg_data tegra_otg_pdata;
-
-#if defined(CONFIG_TEGRA_NVADSP) && \
-		!defined(CONFIG_TEGRA_NVADSP_ON_SMMU)
-static struct nvadsp_platform_data nvadsp_plat_data;
-#endif
 
 static void t210ref_usb_init(void)
 {
@@ -176,11 +172,6 @@ static struct of_dev_auxdata t210ref_auxdata_lookup[] __initdata = {
 			NULL),
 	OF_DEV_AUXDATA("nvidia,tegra210-ahci-sata", 0x70021000, "tegra-sata.0",
 		NULL),
-#if defined(CONFIG_TEGRA_NVADSP) && \
-		!defined(CONFIG_TEGRA_NVADSP_ON_SMMU)
-	OF_DEV_AUXDATA("nvidia,tegra210-adsp", TEGRA_APE_AMC_BASE,
-			"tegra210-adsp", &nvadsp_plat_data),
-#endif
 	OF_DEV_AUXDATA("nvidia,tegra210-adsp-audio", 0, "adsp_audio.3", NULL),
 	OF_DEV_AUXDATA("nvidia,tegra210-efuse", TEGRA_FUSE_BASE, "tegra-fuse",
 			NULL),
@@ -188,6 +179,7 @@ static struct of_dev_auxdata t210ref_auxdata_lookup[] __initdata = {
 	OF_DEV_AUXDATA("linux,spdif-dit", 1, "spdif-dit.1", NULL),
 	OF_DEV_AUXDATA("linux,spdif-dit", 2, "spdif-dit.2", NULL),
 	OF_DEV_AUXDATA("linux,spdif-dit", 3, "spdif-dit.3", NULL),
+	OF_DEV_AUXDATA("linux,spdif-dit", 4, "spdif-dit.4", NULL),
 	OF_DEV_AUXDATA("nvidia,tegra210-xhci", 0x70090000, "tegra-xhci",
 			NULL),
 	OF_DEV_AUXDATA("nvidia,tegra210-xudc", 0x700D0000, "tegra-xudc",
@@ -241,8 +233,8 @@ static struct tegra_suspend_platform_data t210ref_suspend_data = {
 	.cpu_timer      = 1700,
 	.cpu_off_timer  = 300,
 	.suspend_mode   = TEGRA_SUSPEND_LP0,
-	.core_timer     = 0x257e,
-	.core_off_timer = 1280,
+	.core_timer     = 0x61e1,
+	.core_off_timer = 1350,
 	.cpu_suspend_freq = 204000,
 	.corereq_high   = true,
 	.sysclkreq_high = true,
@@ -398,13 +390,9 @@ static void __init tegra_t210ref_reserve(void)
 	ulong fb2_size = SZ_4M;
 #endif
 	ulong fb1_size = SZ_64M + SZ_8M;
-	ulong vpr_size = 186 * SZ_1M;
-
-#if defined(CONFIG_TEGRA_NVADSP) && \
-		!defined(CONFIG_TEGRA_NVADSP_ON_SMMU)
-	nvadsp_plat_data.co_pa = tegra_reserve_adsp(SZ_32M);
-	nvadsp_plat_data.co_size = SZ_32M;
-#endif
+	ulong vpr_size = 364 * SZ_1M;
+	if (of_flat_dt_is_compatible(of_get_flat_dt_root(), "nvidia,foster-e"))
+		vpr_size = 672 * SZ_1M;
 
 #ifdef CONFIG_FRAMEBUFFER_CONSOLE
 	/* support FBcon on 4K monitors */

@@ -3,7 +3,7 @@
  *
  * Tegra Graphics Host VI
  *
- * Copyright (c) 2012-2014, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2012-2016, NVIDIA CORPORATION. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -18,6 +18,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <linux/init.h>
 #include <linux/export.h>
 #include <linux/module.h>
 #include <linux/resource.h>
@@ -26,6 +27,7 @@
 #include <linux/of_device.h>
 #include <linux/of_platform.h>
 #include <linux/clk/tegra.h>
+#include <linux/tegra-soc.h>
 #include <linux/tegra_pm_domains.h>
 #include <linux/debugfs.h>
 
@@ -38,7 +40,6 @@
 #include "t210/t210.h"
 #include "vi.h"
 #include "vi_irq.h"
-#include "camera_priv_defs.h"
 
 #ifdef CONFIG_ARCH_TEGRA_18x_SOC
 #include "t186/t186.h"
@@ -65,6 +66,53 @@ static struct of_device_id tegra_vi_of_match[] = {
 
 static struct i2c_camera_ctrl *i2c_ctrl;
 
+static void (*mfi_callback)(void *);
+static void *mfi_callback_arg;
+static DEFINE_MUTEX(vi_isr_lock);
+
+#ifdef CONFIG_VIDEO_TEGRA_VI
+int tegra_vi_register_mfi_cb(callback cb, void *cb_arg)
+{
+	if (mfi_callback || mfi_callback_arg) {
+		pr_err("cb already registered\n");
+		return -1;
+	}
+
+	mutex_lock(&vi_isr_lock);
+	mfi_callback = cb;
+	mfi_callback_arg = cb_arg;
+	mutex_unlock(&vi_isr_lock);
+
+	return 0;
+}
+EXPORT_SYMBOL(tegra_vi_register_mfi_cb);
+
+int tegra_vi_unregister_mfi_cb(void)
+{
+	mutex_lock(&vi_isr_lock);
+	mfi_callback = NULL;
+	mfi_callback_arg = NULL;
+	mutex_unlock(&vi_isr_lock);
+
+	return 0;
+}
+EXPORT_SYMBOL(tegra_vi_unregister_mfi_cb);
+#endif
+
+static void vi_mfi_worker(struct work_struct *vi_work)
+{
+	struct vi *pdev = container_of(vi_work, struct vi, mfi_cb_work);
+
+	if (mfi_callback == NULL) {
+		dev_dbg(&pdev->ndev->dev, "NULL callback\n");
+		return;
+	}
+	mutex_lock(&vi_isr_lock);
+	mfi_callback(mfi_callback_arg);
+	mutex_unlock(&vi_isr_lock);
+	return;
+}
+
 #if defined(CONFIG_TEGRA_ISOMGR)
 static int vi_isomgr_unregister(struct vi *tegra_vi)
 {
@@ -79,7 +127,7 @@ static int vi_out_show(struct seq_file *s, void *unused)
 {
 	struct vi *vi = s->private;
 
-	seq_printf(s, "vi[%d] overflow: %u\n", vi->ndev->id,
+	seq_printf(s, "vi overflow: %u\n",
 		atomic_read(&(vi->vi_out.overflow)));
 
 	return 0;
@@ -110,8 +158,7 @@ static void vi_create_debugfs(struct vi *vi)
 	char debugfs_file_name[20];
 
 
-	snprintf(tegra_vi_name, sizeof(tegra_vi_name),
-			"%s_%u", TEGRA_VI_NAME, vi->ndev->id);
+	snprintf(tegra_vi_name, sizeof(tegra_vi_name), "%s", TEGRA_VI_NAME);
 
 	vi->debugdir = debugfs_create_dir(tegra_vi_name, NULL);
 	if (!vi->debugdir) {
@@ -121,8 +168,7 @@ static void vi_create_debugfs(struct vi *vi)
 		goto create_debugfs_fail;
 	}
 
-	snprintf(debugfs_file_name, sizeof(debugfs_file_name),
-			"%s_%u", "vi_out", vi->ndev->id);
+	snprintf(debugfs_file_name, sizeof(debugfs_file_name), "%s", "vi_out");
 
 	ret = debugfs_create_file(debugfs_file_name, S_IRUGO,
 			vi->debugdir, vi, &vi_out_fops);
@@ -148,6 +194,10 @@ static int nvhost_vi_slcg_handler(struct notifier_block *nb,
 	struct nvhost_device_data *pdata =
 		container_of(nb, struct nvhost_device_data,
 			toggle_slcg_notifier);
+	struct vi *tegra_vi = (struct vi *)pdata->private_data;
+
+	if (tegra_vi->mc_vi.pg_mode)
+		return NOTIFY_OK;
 
 	clk = clk_get(&pdata->pdev->dev, "pll_d");
 	if (IS_ERR(clk))
@@ -233,11 +283,27 @@ static int vi_probe(struct platform_device *dev)
 		return -ENOMEM;
 	}
 
+	tegra_vi->ndev = dev;
+	tegra_vi->dev = &dev->dev;
 	err = nvhost_client_device_get_resources(dev);
 	if (err)
 		goto vi_probe_fail;
 
-	tegra_vi->ndev = dev;
+	if (!pdata->aperture[0]) {
+		dev_err(&dev->dev, "%s: failed to map register base\n",
+				__func__);
+		return -ENXIO;
+	}
+
+	/* create workqueue for mfi callback */
+	tegra_vi->vi_workqueue = alloc_workqueue("vi_workqueue",
+					WQ_HIGHPRI | WQ_UNBOUND, 1);
+	if (!tegra_vi->vi_workqueue) {
+		dev_err(&dev->dev, "Failed to allocated vi_workqueue");
+		goto vi_probe_fail;
+	}
+	/* Init mfi callback work */
+	INIT_WORK(&tegra_vi->mfi_cb_work, vi_mfi_worker);
 
 	/* call vi_intr_init and stats_work */
 	INIT_WORK(&tegra_vi->stats_work, vi_stats_worker);
@@ -265,7 +331,8 @@ static int vi_probe(struct platform_device *dev)
 			dev_err(&tegra_vi->ndev->dev,
 				"%s: couldn't get regulator\n", __func__);
 		tegra_vi->reg = NULL;
-		goto camera_i2c_unregister;
+		if (tegra_platform_is_silicon())
+			goto camera_i2c_unregister;
 	}
 
 #ifdef CONFIG_TEGRA_CAMERA
@@ -297,13 +364,24 @@ static int vi_probe(struct platform_device *dev)
 	 * as sub-domain of MC domain */
 	err = nvhost_module_add_domain(&pdata->pd, dev);
 #endif
-
 	err = nvhost_client_device_init(dev);
 	if (err)
 		goto camera_unregister;
 
+	err = tegra_csi_init(&tegra_vi->csi, dev);
+	if (err)
+		goto vi_mc_init_error;
+
+	tegra_vi->mc_vi.csi = &tegra_vi->csi;
+	tegra_vi->mc_vi.reg = tegra_vi->reg;
+	err = tegra_vi_media_controller_init(&tegra_vi->mc_vi, dev);
+	if (err)
+		goto vi_mc_init_error;
+
 	return 0;
 
+vi_mc_init_error:
+	nvhost_client_device_release(dev);
 camera_unregister:
 #ifdef CONFIG_TEGRA_CAMERA
 	tegra_camera_unregister(tegra_vi->camera);
@@ -343,6 +421,8 @@ static int __exit vi_remove(struct platform_device *dev)
 
 	vi_remove_debugfs(tegra_vi);
 
+	tegra_vi_media_controller_cleanup(&tegra_vi->mc_vi);
+
 	nvhost_client_device_release(dev);
 
 	if (pdata->slcg_notifier_enable &&
@@ -353,7 +433,8 @@ static int __exit vi_remove(struct platform_device *dev)
 	vi_intr_free(tegra_vi);
 
 	pdata->aperture[0] = NULL;
-
+	flush_workqueue(tegra_vi->vi_workqueue);
+	destroy_workqueue(tegra_vi->vi_workqueue);
 #ifdef CONFIG_TEGRA_CAMERA
 	err = tegra_camera_unregister(tegra_vi->camera);
 	if (err)
@@ -373,16 +454,6 @@ static int __exit vi_remove(struct platform_device *dev)
 
 	pdata->private_data = i2c_ctrl;
 
-	/* Set "master deinitialized" flag on the slave device */
-	if (pdata->slave) {
-		struct nvhost_device_data *slave_pdata =
-			platform_get_drvdata(pdata->slave);
-		if (slave_pdata) {
-			struct vi *slave_vi = slave_pdata->private_data;
-			slave_vi->master_deinitialized = true;
-		}
-	}
-
 	return 0;
 }
 
@@ -401,9 +472,13 @@ static struct platform_driver vi_driver = {
 	}
 };
 
-static struct of_device_id tegra21x_vi_domain_match[] = {
+static struct of_device_id tegra_vi_domain_match[] = {
 	{.compatible = "nvidia,tegra210-ve-pd",
 	.data = (struct nvhost_device_data *)&t21_vi_info},
+	{.compatible = "nvidia,tegra132-ve-pd",
+	.data = (struct nvhost_device_data *)&t124_vi_info},
+	{.compatible = "nvidia,tegra124-ve-pd",
+	 .data = (struct nvhost_device_data *)&t124_vi_info},
 	{},
 };
 
@@ -411,7 +486,7 @@ static int __init vi_init(void)
 {
 	int ret;
 
-	ret = nvhost_domain_init(tegra21x_vi_domain_match);
+	ret = nvhost_domain_init(tegra_vi_domain_match);
 	if (ret)
 		return ret;
 

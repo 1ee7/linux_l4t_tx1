@@ -28,8 +28,8 @@
 #include "tegra210-platforms/tegra210-loki-e-prods.dtsi"
 #include "tegra210-platforms/tegra210-loki-power-tree-p2530-0999-e00.dtsi"
 #include "tegra210-platforms/tegra210-loki-e-gpio-p2530-0032-e00.dtsi"
-#include "tegra210-platforms/tegra210-loki-e-pinmux-p2530-0032-e00.dtsi"
 #include "tegra210-platforms/tegra210-pinmux-drive-sdmmc-common.dtsi"
+#include "tegra210-platforms/tegra210-loki-e-pinmux-p2530-0032-e00.dtsi"
 #include "tegra210-platforms/tegra210-loki-e-comms.dtsi"
 #include "tegra210-platforms/tegra210-loki-e-pwm-fan.dtsi"
 #include "tegra210-platforms/tegra210-ers-hdmi-e2190-1100-a00.dtsi"
@@ -45,10 +45,18 @@
 #include "tegra210-platforms/tegra210-audio.dtsi"
 #include "tegra210-platforms/tegra210-loki-e-gamepad-reset.dtsi"
 #include "tegra210-platforms/tegra210-loki-e-c2port.dtsi"
+#include "tegra210-platforms/tegra210-loki-e-cpufreq.dtsi"
 
 / {
 	compatible = "nvidia,loki-e", "nvidia,tegra210";
 	nvidia,fastboot-usb-pid = <0xb420>;
+
+	firmware {
+		android {
+			compatible = "android,firmware";
+			hardware = "loki_e";
+		};
+	};
 
 	pmc@7000e400 {
 		io-pad-defaults {
@@ -88,10 +96,6 @@
 			compatible = "ads1015";
 			#io-channel-cells = <1>;
 		};
-	};
-
-	i2c@546c0000 {
-		avdd_dsi_csi-supply = <&max77620_gpio7>;
 	};
 
 	spi@7000d400 {
@@ -270,7 +274,6 @@
 			plugin-name = "aec";
 			firmware-name = "libnvaecfx.elf";
 			widget-name = "AEC";
-			param-type = <2>; /* SNDRV_CTL_ELEM_TYPE_INTEGER */
 		};
 	};
 
@@ -357,6 +360,7 @@
 	};
 
 	chosen {
+		nvidia,fastboot_without_usb;
 		nvidia,tegra-shield-sku;
         };
 
@@ -463,11 +467,11 @@
 				nvidia,states = <0 1785>;
 			};
 			consumer5 {
-				nvidia,consumer_name = "display_0";
+				nvidia,consumer_name = "dsi_0";
 				nvidia,states = <0 616>;
 			};
 			consumer6 {
-				nvidia,consumer_name = "display_1";
+				nvidia,consumer_name = "dsi_1";
 				nvidia,states = <0 616>;
 			};
 			consumer7 {
@@ -553,6 +557,9 @@
 	};
 
 	bcmdhd_wlan {
+		fw_path = "/system/vendor/firmware/fw_bcmdhd.bin";
+		nv_path = "/system/etc/nvram_loki_e_4354.txt";
+		tuned_nv_path = "system/etc/nvram_loki_e_antenna_tuned_4354.txt";
 		country_code_map {
 			CC1 {
 				iso_abbrev = "XV";
@@ -684,11 +691,6 @@
 				custom_locale = "E0";
 				custom_locale_rev = <53>;
 			};
-			CC27 {
-				iso_abbrev = "IN";
-				custom_locale = "Q2";
-				custom_locale_rev = <113>;
-			};
 		};
 	};
 
@@ -704,5 +706,12 @@
 
 	serial@70006300 {
 		dma-names = "tx";
+	};
+
+	host1x {
+		i2c@546c0000 {
+			avdd_dsi_csi-supply = <&max77620_gpio7>;
+			status = "okay";
+		};
 	};
 };

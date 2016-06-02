@@ -920,7 +920,7 @@ static int var_to_display(struct display *disp,
 	disp->transp = var->transp;
 	disp->rotate = var->rotate;
 	disp->mode = fb_match_mode(var, &info->modelist);
-	if (WARN_ON(disp->mode == NULL))
+	if (disp->mode == NULL)
 		/* This should not happen */
 		return -EINVAL;
 	return 0;
@@ -2378,10 +2378,8 @@ static int fbcon_blank(struct vc_data *vc, int blank, int mode_switch)
 					fbcon_generic_blank(vc, info, blank);
 		}
 
-		if (!blank) {
-			fb_blank(info, blank);
+		if (!blank)
 			update_screen(vc);
-		}
 	}
 
 	if (mode_switch || fbcon_is_inactive(vc, info) ||

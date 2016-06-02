@@ -356,7 +356,9 @@ static int tegra_fb_blank(int blank, struct fb_info *info)
 		if (!dc->suspended && dc->enabled)
 			tegra_fb->curr_xoffset = -1;
 		tegra_dc_disable(dc);
+#ifdef CONFIG_FRAMEBUFFER_CONSOLE
 		dc->blanked = true;
+#endif
 		return 0;
 
 	default:
@@ -570,11 +572,19 @@ int tegra_fb_update_modelist(struct tegra_dc *dc, int fblistindex)
 	return index;
 }
 
-static int tegra_fb_get_mode(struct tegra_dc *dc)
+static int tegra_fb_get_mode_refresh(struct tegra_dc *dc)
 {
 	if (!dc->fb->info->mode)
 		return -1;
 	return dc->fb->info->mode->refresh;
+}
+
+struct fb_videomode *tegra_fb_get_mode(struct tegra_dc *dc)
+{
+	if (dc && dc->fb && dc->fb->info && dc->fb->info->mode)
+		return dc->fb->info->mode;
+	else
+		return NULL;
 }
 
 static int tegra_fb_set_mode(struct tegra_dc *dc, int fps)
@@ -635,10 +645,12 @@ void tegra_fb_update_monspecs(struct tegra_fb_info *fb_info,
 			      struct fb_monspecs *specs,
 			      bool (*mode_filter)(const struct tegra_dc *dc,
 						  struct fb_videomode *mode))
+
 {
 	struct fb_event event;
 	int i;
 	int blank = FB_BLANK_UNBLANK;
+	struct tegra_dc *dc = fb_info->win.dc;
 
 	mutex_lock(&fb_info->info->lock);
 	fb_destroy_modedb(fb_info->info->monspecs.modedb);
@@ -652,14 +664,17 @@ void tegra_fb_update_monspecs(struct tegra_fb_info *fb_info,
 	fb_info->info->state = FBINFO_STATE_SUSPENDED;
 
 	if (specs == NULL) {
+		struct tegra_dc_mode mode;
 		memset(&fb_info->info->monspecs, 0x0,
 		       sizeof(fb_info->info->monspecs));
+		memset(&mode, 0x0, sizeof(mode));
 
 		/*
 		 * reset video mode properties to prevent garbage being
 		 * displayed on 'mode' device.
 		 */
 		fb_info->info->mode = (struct fb_videomode*) NULL;
+
 #ifdef CONFIG_FRAMEBUFFER_CONSOLE
 		blank = FB_BLANK_POWERDOWN;
 		console_lock();
@@ -668,7 +683,6 @@ void tegra_fb_update_monspecs(struct tegra_fb_info *fb_info,
 		fb_notifier_call_chain(FB_EVENT_BLANK, &event);
 		console_unlock();
 #endif
-
 		/* For L4T - After the next hotplug, framebuffer console will
 		 * use the old variable screeninfo by default, only video-mode
 		 * settings will be overwritten as per monitor connected.
@@ -677,6 +691,7 @@ void tegra_fb_update_monspecs(struct tegra_fb_info *fb_info,
 		memset(&fb_info->info->var, 0x0, sizeof(fb_info->info->var));
 #endif /* CONFIG_FRAMEBUFFER_CONSOLE */
 
+		tegra_dc_set_mode(dc, &mode);
 		mutex_unlock(&fb_info->info->lock);
 		return;
 	}
@@ -687,7 +702,7 @@ void tegra_fb_update_monspecs(struct tegra_fb_info *fb_info,
 
 	for (i = 0; i < specs->modedb_len; i++) {
 		if (mode_filter) {
-			if (mode_filter(fb_info->win.dc, &specs->modedb[i]))
+			if (mode_filter(dc, &specs->modedb[i]))
 				fb_add_videomode(&specs->modedb[i],
 						 &fb_info->info->modelist);
 		} else {
@@ -696,6 +711,11 @@ void tegra_fb_update_monspecs(struct tegra_fb_info *fb_info,
 		}
 	}
 
+	if (dc->out_ops->vrr_update_monspecs)
+		dc->out_ops->vrr_update_monspecs(dc,
+			&fb_info->info->modelist);
+
+	event.info = fb_info->info;
 	/* Restoring to state running. */
 	fb_info->info->state =  FBINFO_STATE_RUNNING;
 #ifdef CONFIG_FRAMEBUFFER_CONSOLE
@@ -721,8 +741,17 @@ void tegra_fb_update_fix(struct tegra_fb_info *fb_info,
 
 	mutex_lock(&fb_info->info->lock);
 
-	fix->capabilities = (tegra_edid_get_cd_flag(dc_edid) <<
-			FB_CAP_FOURCC) & FB_CAP_DC_MASK;
+	/* FB_CAP_* and TEGRA_DC_* color depth flags are shifted by 1 */
+	BUILD_BUG_ON((TEGRA_DC_Y420_30 << 1) != FB_CAP_Y420_DC_30);
+	BUILD_BUG_ON((TEGRA_DC_RGB_48 << 1) != FB_CAP_RGB_DC_48);
+	fix->capabilities = (tegra_edid_get_cd_flag(dc_edid) << 1);
+	if (tegra_edid_get_ex_hdr_cap(dc_edid))
+		fix->capabilities |= FB_CAP_HDR;
+	if (tegra_edid_support_yuv422(dc_edid))
+		fix->capabilities |= FB_CAP_Y422;
+	if (tegra_edid_support_yuv444(dc_edid))
+		fix->capabilities |= FB_CAP_Y444;
+	fix->capabilities |= tegra_edid_get_quant_cap(dc_edid);
 
 	fix->max_clk_rate = tegra_edid_get_max_clk_rate(dc_edid);
 
@@ -746,7 +775,7 @@ static ssize_t nvdps_show(struct device *device,
 	struct platform_device *ndev = to_platform_device(device);
 	struct tegra_dc *dc = platform_get_drvdata(ndev);
 
-	refresh_rate = tegra_fb_get_mode(dc);
+	refresh_rate = tegra_fb_get_mode_refresh(dc);
 	return snprintf(buf, PAGE_SIZE, "%d\n", refresh_rate);
 }
 
@@ -996,6 +1025,9 @@ struct tegra_fb_info *tegra_fb_register(struct platform_device *ndev,
 			fb_add_videomode(&vmode, &info->modelist);
 		}
 	}
+
+	if (dc->out_ops->vrr_update_monspecs)
+		dc->out_ops->vrr_update_monspecs(dc, &info->modelist);
 
 	if (fb_mem)
 		tegra_fb_set_par(info);

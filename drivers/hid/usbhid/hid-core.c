@@ -181,7 +181,7 @@ static void hid_io_error(struct hid_device *hid)
 	if (time_after(jiffies, usbhid->stop_retry)) {
 
 		/* Retries failed, so do a port reset unless we lack bandwidth*/
-		if (test_bit(HID_NO_BANDWIDTH, &usbhid->iofl)
+		if (!test_bit(HID_NO_BANDWIDTH, &usbhid->iofl)
 		     && !test_and_set_bit(HID_RESET_PENDING, &usbhid->iofl)) {
 
 			schedule_work(&usbhid->reset_work);
@@ -1210,6 +1210,8 @@ static int usbhid_start(struct hid_device *hid)
 				USB_INTERFACE_PROTOCOL_MOUSE)
 		usb_disable_autosuspend(dev);
 #endif
+		/* Disabling the auto-suspend for all Hid devices  */
+		usb_disable_autosuspend(dev);
 	return 0;
 
 fail:

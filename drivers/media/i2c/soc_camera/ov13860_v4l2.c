@@ -1,7 +1,7 @@
 /*
  * ov13860.c - ov13860 sensor driver
  *
- * Copyright (c) 2013-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2013-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -330,15 +330,23 @@ static int ov13860_power_on(struct camera_common_data *s_data)
 	if (err)
 		goto ov13860_iovdd_fail;
 
+	if (pw->dvdd)
+		err = regulator_enable(pw->dvdd);
+	if (err)
+		goto ov13860_dvdd_fail;
+
 	usleep_range(10, 20);
 	if (pw->pwdn_gpio)
 		gpio_set_value(pw->pwdn_gpio, 1);
 	if (pw->reset_gpio)
 		gpio_set_value(pw->reset_gpio, 1);
 
-	usleep_range(1000, 2000);
+	usleep_range(2000, 3000);
 	pw->state = SWITCH_ON;
 	return 0;
+
+ov13860_dvdd_fail:
+	regulator_disable(pw->iovdd);
 
 ov13860_iovdd_fail:
 	regulator_disable(pw->avdd);
@@ -374,6 +382,8 @@ static int ov13860_power_off(struct camera_common_data *s_data)
 	if (pw->pwdn_gpio)
 		gpio_set_value(pw->pwdn_gpio, 0);
 
+	if (pw->dvdd)
+		regulator_disable(pw->dvdd);
 	if (pw->iovdd)
 		regulator_disable(pw->iovdd);
 	if (pw->avdd)
@@ -1047,6 +1057,8 @@ static struct camera_common_pdata *ov13860_parse_dt(struct i2c_client *client)
 	struct device_node *np = client->dev.of_node;
 	struct camera_common_pdata *board_priv_pdata;
 	const struct of_device_id *match;
+	int gpio;
+	int err;
 
 	match = of_match_device(ov13860_of_match, &client->dev);
 	if (!match) {
@@ -1061,9 +1073,26 @@ static struct camera_common_pdata *ov13860_parse_dt(struct i2c_client *client)
 		return NULL;
 	}
 
-	of_property_read_string(np, "mclk", &board_priv_pdata->mclk_name);
-	board_priv_pdata->pwdn_gpio = of_get_named_gpio(np, "pwdn-gpios", 0);
-	board_priv_pdata->reset_gpio = of_get_named_gpio(np, "reset-gpios", 0);
+	err = of_property_read_string(np, "mclk",
+				      &board_priv_pdata->mclk_name);
+	if (err) {
+		dev_err(&client->dev, "mclk not in DT\n");
+		goto error;
+	}
+
+	gpio = of_get_named_gpio(np, "pwdn-gpios", 0);
+	if (gpio < 0) {
+		dev_dbg(&client->dev, "pwdn gpios not in DT\n");
+		gpio = 0;
+	}
+	board_priv_pdata->pwdn_gpio = (unsigned int)gpio;
+
+	gpio = of_get_named_gpio(np, "reset-gpios", 0);
+	if (gpio < 0) {
+		dev_dbg(&client->dev, "reset gpios not in DT\n");
+		gpio = 0;
+	}
+	board_priv_pdata->reset_gpio = (unsigned int)gpio;
 
 	of_property_read_string(np, "avdd-reg",
 			&board_priv_pdata->regulators.avdd);
@@ -1077,6 +1106,10 @@ static struct camera_common_pdata *ov13860_parse_dt(struct i2c_client *client)
 	board_priv_pdata->has_eeprom = of_property_read_bool(np, "has-eeprom");
 
 	return board_priv_pdata;
+
+error:
+	devm_kfree(&client->dev, board_priv_pdata);
+	return NULL;
 }
 
 static int ov13860_probe(struct i2c_client *client,

@@ -1,7 +1,7 @@
 /*
  * drivers/video/tegra/dc/dsi.c
  *
- * Copyright (c) 2011-2015, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2011-2016, NVIDIA CORPORATION, All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -49,7 +49,6 @@
 #include "dsi_regs.h"
 #include "dsi.h"
 #include "mipi_cal.h"
-#include "of_dc.h"
 
 /* HACK! This needs to come from DT */
 #include "../../../../arch/arm/mach-tegra/iomap.h"
@@ -419,7 +418,7 @@ void tegra_dsi_clk_enable(struct tegra_dc_dsi_data *dsi)
 {
 	int i = 0;
 	for (i = 0; i < dsi->max_instances; i++) {
-		clk_prepare_enable(dsi->dsi_clk[i]);
+		tegra_disp_clk_prepare_enable(dsi->dsi_clk[i]);
 		udelay(800);
 	}
 }
@@ -428,7 +427,7 @@ void tegra_dsi_clk_disable(struct tegra_dc_dsi_data *dsi)
 {
 	int i = 0;
 	for (i = 0; i < dsi->max_instances; i++) {
-		clk_disable_unprepare(dsi->dsi_clk[i]);
+		tegra_disp_clk_disable_unprepare(dsi->dsi_clk[i]);
 		udelay(800);
 	}
 }
@@ -437,7 +436,7 @@ static inline void tegra_dsi_lp_clk_enable(struct tegra_dc_dsi_data *dsi)
 {
 	int i = 0;
 	for (i = 0; i < dsi->max_instances; i++) {
-		clk_prepare_enable(dsi->dsi_lp_clk[i]);
+		tegra_disp_clk_prepare_enable(dsi->dsi_lp_clk[i]);
 		udelay(800);
 	}
 }
@@ -446,7 +445,7 @@ static inline void tegra_dsi_lp_clk_disable(struct tegra_dc_dsi_data *dsi)
 {
 	int i = 0;
 	for (i = 0; i < dsi->max_instances; i++) {
-		clk_disable_unprepare(dsi->dsi_lp_clk[i]);
+		tegra_disp_clk_disable_unprepare(dsi->dsi_lp_clk[i]);
 		udelay(800);
 	}
 }
@@ -789,7 +788,7 @@ static void tegra_dsi_init_sw(struct tegra_dc *dc,
 	dsi->clk_ref = false;
 
 #if DSI_USE_SYNC_POINTS
-	dsi->syncpt_id = nvhost_get_syncpt_client_managed("dsi");
+	dsi->syncpt_id = nvhost_get_syncpt_client_managed(dc->ndev, "dsi");
 #endif
 
 	tegra_dsi_init_clock_param(dc);
@@ -2161,7 +2160,7 @@ void tegra_dsi_mipi_calibration_13x(struct tegra_dc_dsi_data *dsi)
 		dev_err(&dsi->dc->ndev->dev, "dsi: can't get clk72mhz clock\n");
 		return;
 	}
-	clk_prepare_enable(clk72mhz);
+	tegra_disp_clk_prepare_enable(clk72mhz);
 
 	/* Calibration settings begin */
 	val = tegra_mipi_cal_read(dsi->mipi_cal,
@@ -2279,7 +2278,7 @@ void tegra_dsi_mipi_calibration_13x(struct tegra_dc_dsi_data *dsi)
 		tegra_dsi_mipi_calibration_status(dsi);
 	}
 
-	clk_disable_unprepare(clk72mhz);
+	tegra_disp_clk_disable_unprepare(clk72mhz);
 }
 #endif
 
@@ -2288,13 +2287,12 @@ static void tegra_dsi_mipi_calibration_21x(struct tegra_dc_dsi_data *dsi)
 {
 	u32 val = 0;
 	struct clk *clk72mhz = NULL;
-	char *of_panel_name;
 	clk72mhz = clk_get_sys("clk72mhz", NULL);
 	if (IS_ERR_OR_NULL(clk72mhz)) {
 		dev_err(&dsi->dc->ndev->dev, "dsi: can't get clk72mhz clock\n");
 		return;
 	}
-	clk_prepare_enable(clk72mhz);
+	tegra_disp_clk_prepare_enable(clk72mhz);
 
 	/* Calibration settings begin */
 	val = tegra_mipi_cal_read(dsi->mipi_cal,
@@ -2311,13 +2309,7 @@ static void tegra_dsi_mipi_calibration_21x(struct tegra_dc_dsi_data *dsi)
 	tegra_mipi_cal_write(dsi->mipi_cal, val,
 			MIPI_CAL_MIPI_BIAS_PAD_CFG1_0);
 
-	val = 0;
-	of_panel_name = of_get_panel_name();
-        if (of_panel_name)
-		if (!strcmp(of_panel_name, AUO_12X19_DSI_PANEL))
-			val = (DSI_PAD_OUTADJ3(0x4) | DSI_PAD_OUTADJ2(0x4) |
-				DSI_PAD_OUTADJ1(0x4) | DSI_PAD_OUTADJ0(0x4));
-	tegra_dsi_writel(dsi, val, DSI_PAD_CONTROL_1_VS1);
+	tegra_dsi_writel(dsi, 0, DSI_PAD_CONTROL_1_VS1);
 	tegra_dsi_writel(dsi, 0, DSI_PAD_CONTROL_2_VS1);
 
 	val = tegra_dsi_readl(dsi, DSI_PAD_CONTROL_3_VS1);
@@ -2388,7 +2380,7 @@ static void tegra_dsi_mipi_calibration_21x(struct tegra_dc_dsi_data *dsi)
 		tegra_dsi_mipi_calibration_status(dsi);
 	}
 
-	clk_disable_unprepare(clk72mhz);
+	tegra_disp_clk_disable_unprepare(clk72mhz);
 }
 #endif
 
@@ -2404,7 +2396,7 @@ tegra_dsi_mipi_calibration_12x(struct tegra_dc_dsi_data *dsi)
 		dev_err(&dsi->dc->ndev->dev, "dsi: can't get clk72mhz clock\n");
 		return;
 	}
-	clk_prepare_enable(clk72mhz);
+	tegra_disp_clk_prepare_enable(clk72mhz);
 
 	/* Calibration settings begin */
 	val = tegra_mipi_cal_read(dsi->mipi_cal,
@@ -2529,7 +2521,7 @@ tegra_dsi_mipi_calibration_12x(struct tegra_dc_dsi_data *dsi)
 		tegra_dsi_mipi_calibration_status(dsi);
 	}
 
-	clk_disable_unprepare(clk72mhz);
+	tegra_disp_clk_disable_unprepare(clk72mhz);
 }
 #endif
 
@@ -2544,7 +2536,7 @@ void tegra_dsi_mipi_calibration_14x(struct tegra_dc_dsi_data *dsi)
 		dev_err(&dsi->dc->ndev->dev, "dsi: can't get clk72mhz clock\n");
 		return;
 	}
-	clk_prepare_enable(clk72mhz);
+	tegra_disp_clk_prepare_enable(clk72mhz);
 
 	tegra_mipi_cal_write(dsi->mipi_cal,
 			PAD_DRIV_DN_REF(0x2),
@@ -2583,7 +2575,7 @@ void tegra_dsi_mipi_calibration_14x(struct tegra_dc_dsi_data *dsi)
 
 	tegra_dsi_mipi_calibration_status(dsi);
 
-	clk_disable_unprepare(clk72mhz);
+	tegra_disp_clk_disable_unprepare(clk72mhz);
 }
 #endif
 
@@ -3913,7 +3905,7 @@ int tegra_dsi_read_data(struct tegra_dc *dc,
 	tegra_dc_dsi_hold_host(dc);
 	mutex_lock(&dsi->lock);
 	tegra_dc_io_start(dc);
-	clk_prepare_enable(dsi->dsi_fixed_clk);
+	tegra_disp_clk_prepare_enable(dsi->dsi_fixed_clk);
 	tegra_dsi_lp_clk_enable(dsi);
 	init_status = tegra_dsi_prepare_host_transmission(
 				dc, dsi, DSI_LP_OP_WRITE);
@@ -3972,7 +3964,7 @@ fail:
 	if (err < 0)
 		dev_err(&dc->ndev->dev, "Failed to restore prev state\n");
 	tegra_dsi_lp_clk_disable(dsi);
-	clk_disable_unprepare(dsi->dsi_fixed_clk);
+	tegra_disp_clk_disable_unprepare(dsi->dsi_fixed_clk);
 	tegra_dc_io_end(dc);
 	mutex_unlock(&dsi->lock);
 	tegra_dc_dsi_release_host(dc);
@@ -4016,7 +4008,7 @@ int tegra_dsi_panel_sanity_check(struct tegra_dc *dc,
 	}
 	tegra_dc_dsi_hold_host(dc);
 	tegra_dc_io_start(dc);
-	clk_prepare_enable(dsi->dsi_fixed_clk);
+	tegra_disp_clk_prepare_enable(dsi->dsi_fixed_clk);
 	tegra_dsi_lp_clk_enable(dsi);
 	memset(flagset, 0, sizeof(flagset));
 	init_status = tegra_dsi_prepare_host_transmission(
@@ -4099,7 +4091,7 @@ fail:
 	if (err < 0)
 		dev_err(&dc->ndev->dev, "Failed to restore prev state\n");
 	tegra_dsi_lp_clk_disable(dsi);
-	clk_disable_unprepare(dsi->dsi_fixed_clk);
+	tegra_disp_clk_disable_unprepare(dsi->dsi_fixed_clk);
 	tegra_dc_io_end(dc);
 	tegra_dc_dsi_release_host(dc);
 	return err;
@@ -4274,7 +4266,7 @@ static void tegra_dc_dsi_enable(struct tegra_dc *dc)
 	struct tegra_dc_dsi_data *dsi = tegra_dc_get_outdata(dc);
 	int err = 0;
 
-	sysedp_set_state(dc->sysedpc, 1);
+	sysedp_set_state(dsi->sysedpc, 1);
 	mutex_lock(&dsi->lock);
 	tegra_dc_io_start(dc);
 
@@ -5185,7 +5177,7 @@ static void tegra_dc_dsi_disable(struct tegra_dc *dc)
 	if (dsi->host_suspended)
 		tegra_dsi_host_resume(dc);
 
-	sysedp_set_state(dc->sysedpc, 0);
+	sysedp_set_state(dsi->sysedpc, 0);
 	mutex_lock(&dsi->lock);
 	tegra_dc_io_start(dc);
 
@@ -5288,6 +5280,7 @@ static void tegra_dc_dsi_resume(struct tegra_dc *dc)
 static int tegra_dc_dsi_init(struct tegra_dc *dc)
 {
 	struct tegra_dc_dsi_data *dsi;
+	char sysedp_name[50];
 	int err = 0;
 
 	err = _tegra_dc_dsi_init(dc);
@@ -5312,6 +5305,10 @@ static int tegra_dc_dsi_init(struct tegra_dc *dc)
 		err = PTR_ERR(dsi->mipi_cal);
 		goto err_mipi;
 	}
+
+	sprintf(sysedp_name, "dsi_%d", dsi->dc->ndev->id);
+	dsi->sysedpc = sysedp_create_consumer(sysedp_name, sysedp_name);
+
 	return 0;
 err_mipi:
 	if (dsi->avdd_dsi_csi)
@@ -5390,6 +5387,43 @@ static void tegra_dc_dsi_vrr_enable(struct tegra_dc *dc, bool enable)
 		vrr->enable = enable;
 }
 
+void tegra_dsi_vrr_update_monspecs(struct tegra_dc *dc,
+	struct list_head *head)
+{
+	struct tegra_vrr *vrr;
+	struct list_head *pos;
+	struct fb_modelist *modelist;
+	struct fb_videomode *m;
+	struct fb_videomode m_vrr;
+
+	if (!head || !head->next)
+		return;
+
+	vrr = dc->out->vrr;
+
+	if (!vrr || !vrr->capability)
+		return;
+
+	/* Check whether VRR modes were already added */
+	list_for_each(pos, head) {
+		modelist = list_entry(pos, struct fb_modelist, list);
+		m = &modelist->mode;
+
+		if (m->vmode & FB_VMODE_VRR)
+			return;
+	}
+
+	/* For DSI VRR, the runtime mode (as opposed to initialization
+	 * mode) is the first mode in the list. We mark that first mode
+	 * as VRR-compatible by adding FB_VMODE_VRR to a duplicated instance
+	 * of this mode. */
+	modelist = list_entry(head->next, struct fb_modelist, list);
+	m = &modelist->mode;
+	m_vrr = *m;
+	m_vrr.vmode |= FB_VMODE_VRR;
+	fb_add_videomode(&m_vrr, head);
+}
+
 static void tegra_dc_dsi_modeset_notifier(struct tegra_dc *dc)
 {
 	struct tegra_dc_dsi_data *dsi = tegra_dc_get_outdata(dc);
@@ -5415,5 +5449,6 @@ struct tegra_dc_out_ops tegra_dc_dsi_ops = {
 	.setup_clk = tegra_dc_dsi_setup_clk,
 	.osidle = tegra_dc_dsi_osidle,
 	.vrr_enable = tegra_dc_dsi_vrr_enable,
+	.vrr_update_monspecs = tegra_dsi_vrr_update_monspecs,
 	.modeset_notifier = tegra_dc_dsi_modeset_notifier,
 };

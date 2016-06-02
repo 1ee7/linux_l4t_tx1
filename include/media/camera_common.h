@@ -1,7 +1,7 @@
 /**
  * camera_common.h - utilities for tegra camera driver
  *
- * Copyright (c) 2015, NVIDIA Corporation.  All rights reserved.
+ * Copyright (c) 2015-2016, NVIDIA Corporation.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -25,6 +25,7 @@
 #include <linux/regmap.h>
 #include <linux/clk.h>
 #include <linux/regulator/consumer.h>
+#include <linux/platform_device.h>
 #include <linux/videodev2.h>
 
 #include <linux/kernel.h>
@@ -34,6 +35,7 @@
 #include <media/v4l2-subdev.h>
 #include <media/v4l2-ctrls.h>
 #include <media/soc_camera.h>
+#include <media/nvc_focus.h>
 
 #define V4L2_CID_TEGRA_CAMERA_BASE	(V4L2_CTRL_CLASS_CAMERA | 0x2000)
 
@@ -41,15 +43,16 @@
 #define V4L2_CID_COARSE_TIME		(V4L2_CID_TEGRA_CAMERA_BASE+1)
 #define V4L2_CID_COARSE_TIME_SHORT	(V4L2_CID_TEGRA_CAMERA_BASE+2)
 #define V4L2_CID_GROUP_HOLD		(V4L2_CID_TEGRA_CAMERA_BASE+3)
-#define V4L2_CID_HDR_EN		(V4L2_CID_TEGRA_CAMERA_BASE+4)
+#define V4L2_CID_HDR_EN			(V4L2_CID_TEGRA_CAMERA_BASE+4)
 #define V4L2_CID_EEPROM_DATA		(V4L2_CID_TEGRA_CAMERA_BASE+5)
 #define V4L2_CID_OTP_DATA		(V4L2_CID_TEGRA_CAMERA_BASE+6)
 #define V4L2_CID_FUSE_ID		(V4L2_CID_TEGRA_CAMERA_BASE+7)
-#define V4L2_CID_GANG_MODE		(V4L2_CID_TEGRA_CAMERA_BASE+8)
 
-#define V4L2_CID_TEGRA_CAMERA_LAST	(V4L2_CID_TEGRA_CAMERA_BASE+9)
+#define V4L2_CID_TEGRA_CAMERA_LAST	(V4L2_CID_TEGRA_CAMERA_BASE+8)
+#define V4L2_CID_VI_SET_BYPASS_PORT	(V4L2_CID_TEGRA_CAMERA_BASE+9)
 
 #define MAX_BUFFER_SIZE			32
+#define MAX_CID_CONTROLS		16
 
 struct reg_8 {
 	u16 addr;
@@ -65,8 +68,6 @@ struct camera_common_power_rail {
 	struct regulator *dvdd;
 	struct regulator *avdd;
 	struct regulator *iovdd;
-	struct regulator *ext_reg1;
-	struct regulator *ext_reg2;
 	struct regulator *vcmvdd;
 	struct clk *mclk;
 	unsigned int pwdn_gpio;
@@ -84,6 +85,7 @@ struct camera_common_regulators {
 
 struct camera_common_pdata {
 	const char *mclk_name; /* NULL for default default_mclk */
+	const char *parentclk_name; /* NULL for no parent clock*/
 	unsigned int pwdn_gpio;
 	unsigned int reset_gpio;
 	unsigned int af_gpio;
@@ -152,6 +154,7 @@ struct camera_common_data {
 	struct camera_common_sensor_ops		*ops;
 	struct v4l2_ctrl_handler		*ctrl_handler;
 	struct i2c_client			*i2c_client;
+	struct device				*dev;
 	const struct camera_common_frmfmt	*frmfmt;
 	const struct camera_common_colorfmt	*colorfmt;
 	struct dentry				*debugdir;
@@ -163,13 +166,35 @@ struct camera_common_data {
 	void	*priv;
 	int	ident;
 	int	numctrls;
-	int csi_port;
-	int numlanes;
+	int	csi_port;
+	int	numlanes;
 	int	mode;
 	int	numfmts;
 	int	def_mode, def_width, def_height;
 	int	def_clk_freq;
 	int	fmt_width, fmt_height;
+};
+
+struct camera_common_focuser_data;
+
+struct camera_common_focuser_ops {
+	int (*power_on)(struct camera_common_focuser_data *s_data);
+	int (*power_off)(struct camera_common_focuser_data *s_data);
+	int (*load_config)(struct camera_common_focuser_data *s_data);
+	int (*ctrls_init)(struct camera_common_focuser_data *s_data);
+};
+
+struct camera_common_focuser_data {
+	struct camera_common_focuser_ops	*ops;
+	struct v4l2_ctrl_handler		*ctrl_handler;
+	struct v4l2_subdev			subdev;
+	struct v4l2_ctrl			**ctrls;
+	struct i2c_client			*i2c_client;
+
+	struct nv_focuser_config		config;
+	void					*priv;
+	int					pwr_dev;
+	int					def_position;
 };
 
 static inline void msleep_range(unsigned int delay_base)
@@ -184,11 +209,22 @@ static inline struct camera_common_data *to_camera_common_data(
 			    struct camera_common_data, subdev);
 }
 
+static inline struct camera_common_focuser_data *to_camera_common_focuser_data(
+	const struct i2c_client *client)
+{
+	return container_of(i2c_get_clientdata(client),
+			    struct camera_common_focuser_data, subdev);
+}
+
 int camera_common_g_ctrl(struct camera_common_data *s_data,
 			 struct v4l2_control *control);
 
 int camera_common_regulator_get(struct i2c_client *client,
 		       struct regulator **vreg, const char *vreg_name);
+int camera_common_parse_clocks(struct i2c_client *client,
+			struct camera_common_pdata *pdata);
+int camera_common_parse_ports(struct i2c_client *client,
+			      struct camera_common_data *s_data);
 
 int camera_common_debugfs_show(struct seq_file *s, void *unused);
 ssize_t camera_common_debugfs_write(
@@ -203,6 +239,9 @@ void camera_common_create_debugfs(struct camera_common_data *s_data,
 
 const struct camera_common_colorfmt *camera_common_find_datafmt(
 		enum v4l2_mbus_pixelcode code);
+int camera_common_enum_mbus_code(struct v4l2_subdev *sd,
+				struct v4l2_subdev_fh *fh,
+				struct v4l2_subdev_mbus_code_enum *code);
 int camera_common_enum_fmt(struct v4l2_subdev *sd, unsigned int index,
 			 enum v4l2_mbus_pixelcode *code);
 int camera_common_try_fmt(struct v4l2_subdev *sd,
@@ -212,8 +251,12 @@ int camera_common_g_fmt(struct v4l2_subdev *sd, struct v4l2_mbus_framefmt *mf);
 int camera_common_g_chip_ident(struct v4l2_subdev *sd,
 			     struct v4l2_dbg_chip_ident *id);
 int camera_common_s_power(struct v4l2_subdev *sd, int on);
+void camera_common_dpd_disable(struct camera_common_data *s_data);
+void camera_common_dpd_enable(struct camera_common_data *s_data);
 int camera_common_g_mbus_config(struct v4l2_subdev *sd,
 			      struct v4l2_mbus_config *cfg);
-
+/* Focuser */
+int camera_common_focuser_init(struct camera_common_focuser_data *s_data);
+int camera_common_focuser_s_power(struct v4l2_subdev *sd, int on);
 
 #endif /* __camera_common__ */

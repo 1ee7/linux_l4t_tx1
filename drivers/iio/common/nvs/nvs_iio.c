@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
+/* Copyright (c) 2014-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -76,8 +76,7 @@
 #include <linux/iio/trigger.h>
 #include <linux/nvs.h>
 
-#define NVS_IIO_DRIVER_VERSION		(209)
-#define NVS_ATTRS_ARRAY_SIZE		(12)
+#define NVS_IIO_DRIVER_VERSION		(212)
 
 enum NVS_ATTR {
 	NVS_ATTR_ENABLE,
@@ -107,6 +106,56 @@ enum NVS_DBG {
 	NVS_INFO_DBG_KEY = 0x131071D,
 };
 
+static ssize_t nvs_info_show(struct device *dev,
+			     struct device_attribute *attr, char *buf);
+static ssize_t nvs_info_store(struct device *dev,
+			      struct device_attribute *attr,
+			      const char *buf, size_t count);
+static ssize_t nvs_attr_show(struct device *dev,
+			     struct device_attribute *attr, char *buf);
+static ssize_t nvs_attr_store(struct device *dev,
+			      struct device_attribute *attr,
+			      const char *buf, size_t count);
+
+static DEVICE_ATTR(nvs, S_IRUGO | S_IWUSR | S_IWGRP,
+		   nvs_info_show, nvs_info_store);
+static IIO_DEVICE_ATTR(enable, S_IRUGO | S_IWUSR | S_IWGRP,
+		       nvs_attr_show, nvs_attr_store, NVS_ATTR_ENABLE);
+static IIO_DEVICE_ATTR(part, S_IRUGO,
+		       nvs_attr_show, NULL, NVS_ATTR_PART);
+static IIO_DEVICE_ATTR(vendor, S_IRUGO,
+		       nvs_attr_show, NULL, NVS_ATTR_VENDOR);
+static IIO_DEVICE_ATTR(version, S_IRUGO,
+		       nvs_attr_show, NULL, NVS_ATTR_VERSION);
+static IIO_DEVICE_ATTR(milliamp, S_IRUGO,
+		       nvs_attr_show, NULL, NVS_ATTR_MILLIAMP);
+static IIO_DEVICE_ATTR(fifo_reserved_event_count, S_IRUGO,
+		       nvs_attr_show, NULL, NVS_ATTR_FIFO_RSRV_EVNT_CNT);
+static IIO_DEVICE_ATTR(fifo_max_event_count, S_IRUGO,
+		       nvs_attr_show, NULL, NVS_ATTR_FIFO_MAX_EVNT_CNT);
+static IIO_DEVICE_ATTR(flags, S_IRUGO | S_IWUSR | S_IWGRP,
+		       nvs_attr_show, nvs_attr_store, NVS_ATTR_FLAGS);
+/* matrix permissions are read only - writes are for debug */
+static IIO_DEVICE_ATTR(matrix, S_IRUGO,
+		       nvs_attr_show, nvs_attr_store, NVS_ATTR_MATRIX);
+static IIO_DEVICE_ATTR(self_test, S_IRUGO,
+		       nvs_attr_show, NULL, NVS_ATTR_SELF_TEST);
+
+static struct attribute *nvs_attrs[] = {
+	&dev_attr_nvs.attr,
+	&iio_dev_attr_enable.dev_attr.attr,
+	&iio_dev_attr_part.dev_attr.attr,
+	&iio_dev_attr_vendor.dev_attr.attr,
+	&iio_dev_attr_version.dev_attr.attr,
+	&iio_dev_attr_milliamp.dev_attr.attr,
+	&iio_dev_attr_fifo_reserved_event_count.dev_attr.attr,
+	&iio_dev_attr_fifo_max_event_count.dev_attr.attr,
+	&iio_dev_attr_flags.dev_attr.attr,
+	&iio_dev_attr_matrix.dev_attr.attr,
+	&iio_dev_attr_self_test.dev_attr.attr,
+	NULL
+};
+
 struct nvs_state {
 	void *client;
 	struct device *dev;
@@ -114,7 +163,7 @@ struct nvs_state {
 	struct sensor_cfg *cfg;
 	struct iio_trigger *trig;
 	struct iio_chan_spec *ch;
-	struct attribute *attrs[NVS_ATTRS_ARRAY_SIZE];
+	struct attribute *attrs[ARRAY_SIZE(nvs_attrs)];
 	struct attribute_group attr_group;
 	struct iio_info info;
 	bool shutdown;
@@ -332,19 +381,22 @@ static void nvs_mutex_lock(void *handle)
 {
 	struct iio_dev *indio_dev = (struct iio_dev *)handle;
 
-	mutex_lock(&indio_dev->mlock);
+	if (indio_dev)
+		mutex_lock(&indio_dev->mlock);
 }
 
 static void nvs_mutex_unlock(void *handle)
 {
 	struct iio_dev *indio_dev = (struct iio_dev *)handle;
 
-	mutex_unlock(&indio_dev->mlock);
+	if (indio_dev)
+		mutex_unlock(&indio_dev->mlock);
 }
 
 static ssize_t nvs_dbg_cfg(struct iio_dev *indio_dev, char *buf)
 {
 	struct nvs_state *st = iio_priv(indio_dev);
+	unsigned int i;
 	ssize_t t;
 
 	t = sprintf(buf, "name=%s\n", st->cfg->name);
@@ -357,7 +409,10 @@ static ssize_t nvs_dbg_cfg(struct iio_dev *indio_dev, char *buf)
 	t += sprintf(buf + t, "ch_inf=%p\n", st->cfg->ch_inf);
 	t += sprintf(buf + t, "delay_us_min=%u\n", st->cfg->delay_us_min);
 	t += sprintf(buf + t, "delay_us_max=%u\n", st->cfg->delay_us_max);
-	t += sprintf(buf + t, "uncal_lo=%d\n", st->cfg->uncal_lo);
+	t += sprintf(buf + t, "matrix: ");
+	for (i = 0; i < 9; i++)
+		t += sprintf(buf + t, "%hhd ", st->cfg->matrix[i]);
+	t += sprintf(buf + t, "\nuncal_lo=%d\n", st->cfg->uncal_lo);
 	t += sprintf(buf + t, "uncal_hi=%d\n", st->cfg->uncal_hi);
 	t += sprintf(buf + t, "cal_lo=%d\n", st->cfg->cal_lo);
 	t += sprintf(buf + t, "cal_hi=%d\n", st->cfg->cal_hi);
@@ -514,7 +569,7 @@ static int nvs_buf_push(struct iio_dev *indio_dev, unsigned char *data, s64 ts)
 	}
 	if ((*st->fn_dev->sts & NVS_STS_SPEW_DATA) && ts) {
 		nvs_dbg_data(indio_dev, char_buf);
-		dev_info(st->dev, "%s %s", st->cfg->name, char_buf);
+		dev_info(st->dev, "%s", char_buf);
 	}
 	if (!ret)
 		/* return pushed byte count from data if no error.
@@ -528,8 +583,11 @@ static int nvs_handler(void *handle, void *buffer, s64 ts)
 {
 	struct iio_dev *indio_dev = (struct iio_dev *)handle;
 	unsigned char *buf = buffer;
+	int ret = 0;
 
-	return nvs_buf_push(indio_dev, buf, ts);
+	if (indio_dev)
+		ret = nvs_buf_push(indio_dev, buf, ts);
+	return ret;
 }
 
 static int nvs_enable(struct iio_dev *indio_dev, bool en)
@@ -742,7 +800,7 @@ static ssize_t nvs_info_store(struct device *dev,
 	st->dbg = dbg;
 	switch (dbg) {
 	case NVS_INFO_DATA:
-		*st->fn_dev->sts &= ~NVS_STS_SPEW_COMMON;
+		*st->fn_dev->sts &= ~NVS_STS_SPEW_MSK;
 		break;
 
 	case NVS_INFO_DBG:
@@ -861,57 +919,14 @@ static ssize_t nvs_info_show(struct device *dev,
 	return ret;
 }
 
-static DEVICE_ATTR(nvs, S_IRUGO | S_IWUSR | S_IWGRP,
-		   nvs_info_show, nvs_info_store);
-static IIO_DEVICE_ATTR(enable, S_IRUGO | S_IWUSR | S_IWGRP,
-		       nvs_attr_show, nvs_attr_store, NVS_ATTR_ENABLE);
-static IIO_DEVICE_ATTR(part, S_IRUGO,
-		       nvs_attr_show, NULL, NVS_ATTR_PART);
-static IIO_DEVICE_ATTR(vendor, S_IRUGO,
-		       nvs_attr_show, NULL, NVS_ATTR_VENDOR);
-static IIO_DEVICE_ATTR(version, S_IRUGO,
-		       nvs_attr_show, NULL, NVS_ATTR_VERSION);
-static IIO_DEVICE_ATTR(milliamp, S_IRUGO,
-		       nvs_attr_show, NULL, NVS_ATTR_MILLIAMP);
-static IIO_DEVICE_ATTR(fifo_reserved_event_count, S_IRUGO,
-		       nvs_attr_show, NULL, NVS_ATTR_FIFO_RSRV_EVNT_CNT);
-static IIO_DEVICE_ATTR(fifo_max_event_count, S_IRUGO,
-		       nvs_attr_show, NULL, NVS_ATTR_FIFO_MAX_EVNT_CNT);
-static IIO_DEVICE_ATTR(flags, S_IRUGO | S_IWUSR | S_IWGRP,
-		       nvs_attr_show, nvs_attr_store, NVS_ATTR_FLAGS);
-/* matrix permissions are read only - writes are for debug */
-static IIO_DEVICE_ATTR(matrix, S_IRUGO,
-		       nvs_attr_show, nvs_attr_store, NVS_ATTR_MATRIX);
-static IIO_DEVICE_ATTR(self_test, S_IRUGO,
-		       nvs_attr_show, NULL, NVS_ATTR_SELF_TEST);
-
-static struct attribute *nvs_attrs[] = {
-	&dev_attr_nvs.attr,
-	&iio_dev_attr_enable.dev_attr.attr,
-	&iio_dev_attr_part.dev_attr.attr,
-	&iio_dev_attr_vendor.dev_attr.attr,
-	&iio_dev_attr_version.dev_attr.attr,
-	&iio_dev_attr_milliamp.dev_attr.attr,
-	&iio_dev_attr_fifo_reserved_event_count.dev_attr.attr,
-	&iio_dev_attr_fifo_max_event_count.dev_attr.attr,
-	&iio_dev_attr_flags.dev_attr.attr,
-	&iio_dev_attr_matrix.dev_attr.attr,
-	&iio_dev_attr_self_test.dev_attr.attr,
-	NULL
-};
-
 static int nvs_attr_rm(struct nvs_state *st, struct attribute *rm_attr)
 {
-	unsigned int n;
 	unsigned int i;
 
-	for (i = 0; i < ARRAY_SIZE(st->attrs); i++) {
+	for (i = 0; i < ARRAY_SIZE(st->attrs) - 1; i++) {
 		if (st->attrs[i] == rm_attr) {
-			do {
-				n = i + 1;
-				st->attrs[i] = st->attrs[n];
-				i++;
-			} while (st->attrs[i] != NULL);
+			for (; i < ARRAY_SIZE(st->attrs) - 1; i++)
+				st->attrs[i] = st->attrs[i + 1];
 			return 0;
 		}
 	}
@@ -924,7 +939,6 @@ static int nvs_attr(struct iio_dev *indio_dev)
 	struct nvs_state *st = iio_priv(indio_dev);
 	unsigned int i;
 
-	BUG_ON(NVS_ATTRS_ARRAY_SIZE < ARRAY_SIZE(nvs_attrs));
 	memcpy(st->attrs, nvs_attrs, sizeof(st->attrs));
 	/* test if matrix data */
 	for (i = 0; i < ARRAY_SIZE(st->cfg->matrix); i++) {
@@ -958,8 +972,8 @@ static int nvs_read_raw(struct iio_dev *indio_dev,
 
 		*val = 0;
 		n = chan->scan_type.storagebits / 8;
-		if (n > sizeof(val))
-			n = sizeof(val);
+		if (n > sizeof(*val))
+			n = sizeof(*val);
 		memcpy(val, &st->buf[ret], n);
 		return IIO_VAL_INT;
 
@@ -1105,7 +1119,7 @@ static int nvs_write_raw(struct iio_dev *indio_dev,
 		old = st->batch_period_us;
 		if (val < st->cfg->delay_us_min)
 			val = st->cfg->delay_us_min;
-		if (val > st->cfg->delay_us_max)
+		if (st->cfg->delay_us_max && val > st->cfg->delay_us_max)
 			val = st->cfg->delay_us_max;
 		if (st->fn_dev->batch) {
 			ret = st->fn_dev->batch(st->client, st->cfg->snsr_id,
@@ -1399,6 +1413,7 @@ static void nvs_chan_scan_type(struct iio_chan_spec *ch, int ch_sz)
 static int nvs_chan(struct iio_dev *indio_dev)
 {
 	struct nvs_state *st = iio_priv(indio_dev);
+	long info_mask_msk = 0;
 	long info_mask = nvs_info_mask_dflt;
 	long info_mask_shared_by_type = nvs_info_mask_shared_by_type_dflt;
 	int ch_status_sz = 0;
@@ -1467,12 +1482,21 @@ static int nvs_chan(struct iio_dev *indio_dev)
 	if (st->ch == NULL)
 		return -ENOMEM;
 
-	if (st->cfg->thresh_lo || st->cfg->thresh_hi) {
-		info_mask |= BIT(IIO_CHAN_INFO_THRESHOLD_LOW) |
-			     BIT(IIO_CHAN_INFO_THRESHOLD_HIGH);
-		info_mask_shared_by_type |= BIT(IIO_CHAN_INFO_THRESHOLD_LOW) |
-					    BIT(IIO_CHAN_INFO_THRESHOLD_HIGH);
-	}
+	if (SENSOR_FLAG_ONE_SHOT_MODE == (st->cfg->flags &
+					  SENSOR_FLAG_SPECIAL_REPORTING_MODE))
+		info_mask_msk = BIT(IIO_CHAN_INFO_BATCH_FLAGS) |
+				BIT(IIO_CHAN_INFO_BATCH_PERIOD) |
+				BIT(IIO_CHAN_INFO_BATCH_TIMEOUT) |
+				BIT(IIO_CHAN_INFO_BATCH_FLUSH);
+
+	info_mask &= ~info_mask_msk;
+	info_mask_shared_by_type &= ~info_mask_msk;
+	info_mask_msk = 0;
+	if (st->cfg->thresh_lo || st->cfg->thresh_hi)
+		info_mask_msk = BIT(IIO_CHAN_INFO_THRESHOLD_LOW) |
+				BIT(IIO_CHAN_INFO_THRESHOLD_HIGH);
+	info_mask |= info_mask_msk;
+	info_mask_shared_by_type |= info_mask_msk;
 	if (!st->cfg->ch_n_max)
 		info_mask_shared_by_type |= BIT(IIO_CHAN_INFO_SCALE) |
 					    BIT(IIO_CHAN_INFO_OFFSET);
@@ -1534,9 +1558,13 @@ static const struct iio_trigger_ops nvs_trigger_ops = {
 static int nvs_suspend(void *handle)
 {
 	struct iio_dev *indio_dev = (struct iio_dev *)handle;
-	struct nvs_state *st = iio_priv(indio_dev);
+	struct nvs_state *st;
 	int ret = 0;
 
+	if (indio_dev == NULL)
+		return 0;
+
+	st = iio_priv(indio_dev);
 	mutex_lock(&indio_dev->mlock);
 	st->suspend = true;
 	if (!(st->cfg->flags & SENSOR_FLAG_WAKE_UP)) {
@@ -1556,9 +1584,13 @@ static int nvs_suspend(void *handle)
 static int nvs_resume(void *handle)
 {
 	struct iio_dev *indio_dev = (struct iio_dev *)handle;
-	struct nvs_state *st = iio_priv(indio_dev);
+	struct nvs_state *st;
 	int ret = 0;
 
+	if (indio_dev == NULL)
+		return 0;
+
+	st = iio_priv(indio_dev);
 	mutex_lock(&indio_dev->mlock);
 	if (!(st->cfg->flags & SENSOR_FLAG_WAKE_UP)) {
 		if (st->enabled)
@@ -1573,9 +1605,13 @@ static int nvs_resume(void *handle)
 static void nvs_shutdown(void *handle)
 {
 	struct iio_dev *indio_dev = (struct iio_dev *)handle;
-	struct nvs_state *st = iio_priv(indio_dev);
+	struct nvs_state *st;
 	int ret;
 
+	if (indio_dev == NULL)
+		return;
+
+	st = iio_priv(indio_dev);
 	mutex_lock(&indio_dev->mlock);
 	st->shutdown = true;
 	ret = st->fn_dev->enable(st->client, st->cfg->snsr_id, -1);
@@ -1587,8 +1623,12 @@ static void nvs_shutdown(void *handle)
 static int nvs_remove(void *handle)
 {
 	struct iio_dev *indio_dev = (struct iio_dev *)handle;
-	struct nvs_state *st = iio_priv(indio_dev);
+	struct nvs_state *st;
 
+	if (indio_dev == NULL)
+		return 0;
+
+	st = iio_priv(indio_dev);
 	if (indio_dev->dev.devt)
 		iio_device_unregister(indio_dev);
 	if (st->trig != NULL) {
@@ -1610,6 +1650,78 @@ static int nvs_remove(void *handle)
 		dev_info(st->dev, "%s snsr_id=%d\n",
 			 __func__, st->cfg->snsr_id);
 	iio_device_free(indio_dev);
+	return 0;
+}
+
+static int nvs_init(struct iio_dev *indio_dev, struct nvs_state *st)
+{
+	int ret;
+
+	ret = nvs_attr(indio_dev);
+	if (ret) {
+		dev_err(st->dev, "%s nvs_attr ERR=%d\n", __func__, ret);
+		return ret;
+	}
+
+	ret = nvs_chan(indio_dev);
+	if (ret) {
+		dev_err(st->dev, "%s nvs_chan ERR=%d\n", __func__, ret);
+		return ret;
+	}
+
+	indio_dev->buffer = iio_kfifo_allocate(indio_dev);
+	if (!indio_dev->buffer) {
+		dev_err(st->dev, "%s iio_kfifo_allocate ERR\n", __func__);
+		return -ENOMEM;
+	}
+
+	indio_dev->buffer->scan_timestamp = true;
+	indio_dev->modes = INDIO_DIRECT_MODE;
+	indio_dev->currentmode = INDIO_DIRECT_MODE;
+	indio_dev->dev.parent = st->dev;
+	indio_dev->name = st->cfg->name;
+	st->info.driver_module = THIS_MODULE;
+	st->info.attrs = &st->attr_group;
+	st->info.read_raw = &nvs_read_raw;
+	st->info.write_raw = &nvs_write_raw;
+	indio_dev->info = &st->info;
+	indio_dev->setup_ops = &nvs_buffer_setup_ops;
+	ret = iio_buffer_register(indio_dev, indio_dev->channels,
+				  indio_dev->num_channels);
+	if (ret) {
+		dev_err(st->dev, "%s iio_buffer_register ERR\n", __func__);
+		return ret;
+	}
+
+	if (st->cfg->kbuf_sz) {
+		indio_dev->buffer->access->set_length(indio_dev->buffer,
+						      st->cfg->kbuf_sz);
+		indio_dev->buffer->access->request_update(indio_dev->buffer);
+	}
+	st->trig = iio_trigger_alloc("%s-dev%d",
+				     indio_dev->name, indio_dev->id);
+	if (st->trig == NULL) {
+		dev_err(st->dev, "%s iio_allocate_trigger ERR\n", __func__);
+		return -ENOMEM;
+	}
+
+	st->trig->dev.parent = st->dev;
+	st->trig->ops = &nvs_trigger_ops;
+	ret = iio_trigger_register(st->trig);
+	if (ret) {
+		dev_err(st->dev, "%s iio_trigger_register ERR\n", __func__);
+		return -ENOMEM;
+	}
+
+	indio_dev->trig = st->trig;
+	indio_dev->modes |= INDIO_BUFFER_TRIGGERED;
+	indio_dev->multi_link = true;
+	ret = iio_device_register(indio_dev);
+	if (ret) {
+		dev_err(st->dev, "%s iio_device_register ERR\n", __func__);
+		return ret;
+	}
+
 	return 0;
 }
 
@@ -1651,86 +1763,20 @@ static int nvs_probe(void **handle, void *dev_client, struct device *dev,
 		st->fn_dev->errs = &st->fn_dev_errs;
 	/* all other pointers are tested for NULL in this code */
 	st->cfg = snsr_cfg;
-	ret = nvs_attr(indio_dev);
+	ret = nvs_init(indio_dev, st);
 	if (ret) {
-		dev_err(st->dev, "%s nvs_attr ERR=%d\n", __func__, ret);
-		goto nvs_probe_err;
+		if (st->cfg->name)
+			dev_err(st->dev, "%s %s snsr_id=%d EXIT ERR=%d\n",
+				__func__, st->cfg->name,
+				st->cfg->snsr_id, ret);
+		else
+			dev_err(st->dev, "%s snsr_id=%d EXIT ERR=%d\n",
+				__func__, st->cfg->snsr_id, ret);
+		nvs_remove(indio_dev);
+	} else {
+		*handle = indio_dev;
 	}
-
-	ret = nvs_chan(indio_dev);
-	if (ret) {
-		dev_err(st->dev, "%s nvs_chan ERR=%d\n", __func__, ret);
-		goto nvs_probe_err;
-	}
-
-	indio_dev->buffer = iio_kfifo_allocate(indio_dev);
-	if (!indio_dev->buffer) {
-		dev_err(st->dev, "%s iio_kfifo_allocate ERR\n", __func__);
-		ret = -ENOMEM;
-		goto nvs_probe_err;
-	}
-
-	indio_dev->buffer->scan_timestamp = true;
-	indio_dev->modes = INDIO_DIRECT_MODE;
-	indio_dev->currentmode = INDIO_DIRECT_MODE;
-	indio_dev->dev.parent = st->dev;
-	indio_dev->name = st->cfg->name;
-	st->info.driver_module = THIS_MODULE;
-	st->info.attrs = &st->attr_group;
-	st->info.read_raw = &nvs_read_raw;
-	st->info.write_raw = &nvs_write_raw;
-	indio_dev->info = &st->info;
-	indio_dev->setup_ops = &nvs_buffer_setup_ops;
-	ret = iio_buffer_register(indio_dev, indio_dev->channels,
-				  indio_dev->num_channels);
-	if (ret) {
-		dev_err(st->dev, "%s iio_buffer_register ERR\n", __func__);
-		goto nvs_probe_err;
-	}
-
-	if (st->cfg->kbuf_sz) {
-		indio_dev->buffer->access->set_length(indio_dev->buffer,
-						      st->cfg->kbuf_sz);
-		indio_dev->buffer->access->request_update(indio_dev->buffer);
-	}
-	st->trig = iio_trigger_alloc("%s-dev%d",
-				     indio_dev->name, indio_dev->id);
-	if (st->trig == NULL) {
-		dev_err(st->dev, "%s iio_allocate_trigger ERR\n", __func__);
-		ret = -ENOMEM;
-		goto nvs_probe_err;
-	}
-
-	st->trig->dev.parent = st->dev;
-	st->trig->ops = &nvs_trigger_ops;
-	ret = iio_trigger_register(st->trig);
-	if (ret) {
-		dev_err(st->dev, "%s iio_trigger_register ERR\n", __func__);
-		ret = -ENOMEM;
-		goto nvs_probe_err;
-	}
-
-	indio_dev->trig = st->trig;
-	indio_dev->modes |= INDIO_BUFFER_TRIGGERED;
-	indio_dev->multi_link = true;
-	ret = iio_device_register(indio_dev);
-	if (ret) {
-		dev_err(st->dev, "%s iio_device_register ERR\n", __func__);
-		goto nvs_probe_err;
-	}
-
-	*handle = indio_dev;
 	dev_info(st->dev, "%s %s done\n", __func__, st->cfg->name);
-	return 0;
-
-nvs_probe_err:
-	if (st->cfg->name)
-		dev_err(st->dev, "%s %s snsr_id=%d EXIT ERR=%d\n",
-			__func__, st->cfg->name, st->cfg->snsr_id, ret);
-	else
-		dev_err(st->dev, "%s snsr_id=%d EXIT ERR=%d\n",
-			__func__, st->cfg->snsr_id, ret);
-	nvs_remove(indio_dev);
 	return ret;
 }
 

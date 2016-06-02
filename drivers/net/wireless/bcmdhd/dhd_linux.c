@@ -517,6 +517,10 @@ typedef struct dhd_info {
 
 #define DHDIF_FWDER(dhdif)      FALSE
 
+int dhd_skip_hang_event(void *dhd) {
+	return (((wifi_adapter_info_t *)(((dhd_info_t *)dhd)->adapter))->skip_hang_evt ? 1:0);
+}
+
 /* Flag to indicate if we should download firmware on driver load */
 uint dhd_download_fw_on_driverload = TRUE;
 
@@ -761,7 +765,7 @@ static int dhd_toe_get(dhd_info_t *dhd, int idx, uint32 *toe_ol);
 static int dhd_toe_set(dhd_info_t *dhd, int idx, uint32 toe_ol);
 #endif /* TOE */
 
-static int dhd_wl_host_event(dhd_info_t *dhd, int *ifidx, void *pktdata,
+static int dhd_wl_host_event(dhd_info_t *dhd, int *ifidx, void *pktdata, size_t pktlen,
                              wl_event_msg_t *event_ptr, void **data_ptr);
 #ifdef DHD_UNICAST_DHCP
 static const uint8 llc_snap_hdr[SNAP_HDR_LEN] = {0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00};
@@ -3174,6 +3178,7 @@ dhd_rx_frame(dhd_pub_t *dhdp, int ifidx, void *pktbuf, int numpkt, uint8 chan)
 #else
 			skb->mac.raw,
 #endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 22) */
+			len - 2,
 			&event,
 			&data);
 
@@ -3943,6 +3948,11 @@ dhd_ethtool(dhd_info_t *dhd, void *uaddr)
 static bool dhd_check_hang(struct net_device *net, dhd_pub_t *dhdp, int error)
 {
 	dhd_info_t *dhd;
+	wifi_adapter_info_t *adapter;
+	char static skip_hang_evt;
+
+	if (skip_hang_evt)
+		return FALSE;
 
 	if (!dhdp) {
 		DHD_ERROR(("%s: dhdp is NULL\n", __FUNCTION__));
@@ -3953,6 +3963,14 @@ static bool dhd_check_hang(struct net_device *net, dhd_pub_t *dhdp, int error)
 		return FALSE;
 
 	dhd = (dhd_info_t *)dhdp->info;
+	adapter = dhd->adapter;
+
+	if (adapter->skip_hang_evt) {
+		skip_hang_evt=1;
+		DHD_TRACE(("%s: skipping hang evt during shutdown\n", __FUNCTION__));
+		return FALSE;
+	}
+
 #if !defined(BCMPCIE)
 	if (dhd->thr_dpc_ctl.thr_pid < 0) {
 		DHD_ERROR(("%s : skipped due to negative pid - unloading?\n", __FUNCTION__));
@@ -4587,6 +4605,8 @@ dhd_event_ifadd(dhd_info_t *dhdinfo, wl_event_data_if_t *ifevent, char *name, ui
 	if (ifevent->ifidx > 0) {
 		dhd_if_event_t *if_event = MALLOC(dhdinfo->pub.osh, sizeof(dhd_if_event_t));
 
+		if (if_event == NULL)
+			return BCME_NOMEM;
 		memcpy(&if_event->event, ifevent, sizeof(if_event->event));
 		memcpy(if_event->mac, mac, ETHER_ADDR_LEN);
 		strncpy(if_event->name, name, IFNAMSIZ);
@@ -4620,6 +4640,8 @@ dhd_event_ifdel(dhd_info_t *dhdinfo, wl_event_data_if_t *ifevent, char *name, ui
 	 * anything else
 	 */
 	if_event = MALLOC(dhdinfo->pub.osh, sizeof(dhd_if_event_t));
+	if (if_event == NULL)
+		return BCME_NOMEM;
 	memcpy(&if_event->event, ifevent, sizeof(if_event->event));
 	memcpy(if_event->mac, mac, ETHER_ADDR_LEN);
 	strncpy(if_event->name, name, IFNAMSIZ);
@@ -5403,6 +5425,27 @@ int dhd_get_fw_mode(dhd_info_t *dhdinfo)
 	return DHD_FLAG_STA_MODE;
 }
 
+static inline bool is_file_valid(const char *file)
+{
+	struct file *fp;
+	mm_segment_t old_fs = get_fs();
+
+	if (!file)
+		return false;
+
+	set_fs(KERNEL_DS);
+
+	fp = filp_open(file, O_RDONLY, 0);
+	if (IS_ERR_OR_NULL(fp)) {
+		set_fs(old_fs);
+		return false;
+	}
+
+	filp_close(fp, NULL);
+	set_fs(old_fs);
+	return true;
+}
+
 bool dhd_update_fw_nv_path(dhd_info_t *dhdinfo)
 {
 	int fw_len;
@@ -5425,21 +5468,23 @@ bool dhd_update_fw_nv_path(dhd_info_t *dhdinfo)
 	/* set default firmware and nvram path for built-in type driver */
 	if (!dhd_download_fw_on_driverload) {
 #ifdef CONFIG_BCMDHD_FW_PATH
-		fw = CONFIG_BCMDHD_FW_PATH;
+		if (is_file_valid(CONFIG_BCMDHD_FW_PATH))
+			fw = CONFIG_BCMDHD_FW_PATH;
 #endif /* CONFIG_BCMDHD_FW_PATH */
 #ifdef CONFIG_BCMDHD_NVRAM_PATH
-		nv = CONFIG_BCMDHD_NVRAM_PATH;
+		if (is_file_valid(CONFIG_BCMDHD_NVRAM_PATH))
+			nv = CONFIG_BCMDHD_NVRAM_PATH;
 #endif /* CONFIG_BCMDHD_NVRAM_PATH */
 	}
 
 	/* check if we need to initialize the path */
-	if (dhdinfo->fw_path[0] == '\0') {
-		if (adapter && adapter->fw_path && adapter->fw_path[0] != '\0')
+	if (adapter && adapter->fw_path && adapter->fw_path[0] != '\0') {
+		if (is_file_valid(adapter->fw_path))
 			fw = adapter->fw_path;
-
 	}
-	if (dhdinfo->nv_path[0] == '\0') {
-		if (adapter && adapter->nv_path && adapter->nv_path[0] != '\0')
+
+	if (adapter && adapter->nv_path && adapter->nv_path[0] != '\0') {
+		if (is_file_valid(adapter->nv_path))
 			nv = adapter->nv_path;
 	}
 
@@ -5447,10 +5492,15 @@ bool dhd_update_fw_nv_path(dhd_info_t *dhdinfo)
 	 *
 	 * TODO: need a solution for multi-chip, can't use the same firmware for all chips
 	 */
-	if (firmware_path[0] != '\0')
-		fw = firmware_path;
-	if (nvram_path[0] != '\0')
-		nv = nvram_path;
+	if (firmware_path[0] != '\0') {
+		if (is_file_valid(firmware_path))
+			fw = firmware_path;
+	}
+
+	if (nvram_path[0] != '\0') {
+		if (is_file_valid(nvram_path))
+			nv = nvram_path;
+	}
 
 	if (fw && fw[0] != '\0') {
 		fw_len = strlen(fw);
@@ -7090,6 +7140,9 @@ dhd_register_if(dhd_pub_t *dhdp, int ifidx, bool need_rtnl_lock)
 		dhd_custom_sysfs_tegra_histogram_stat_netdev = net;
 }
 #endif
+	extern struct net_device *dhd_pno_netdev;
+	if (ifidx == 0)
+		dhd_pno_netdev = net;
 
 	if (err != 0) {
 		DHD_ERROR(("couldn't register the net device [%s], err %d\n", net->name, err));
@@ -7470,6 +7523,9 @@ dhd_module_init(void)
 
 #ifdef CONFIG_BCMDHD_CUSTOM_NET_PERF_TEGRA
 	tegra_net_perf_init();
+#endif
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+	rf_test_params_init();
 #endif
 
 	DHD_PERIM_RADIO_INIT();
@@ -7987,7 +8043,7 @@ dhd_wlanaudio_event(dhd_info_t *dhd, int *ifidx, void *pktdata,
 }
 #endif /* CUSTOMER_HW20 && WLANAUDIO */
 static int
-dhd_wl_host_event(dhd_info_t *dhd, int *ifidx, void *pktdata,
+dhd_wl_host_event(dhd_info_t *dhd, int *ifidx, void *pktdata, size_t pktlen,
 	wl_event_msg_t *event, void **data)
 {
 	int bcmerror = 0;
@@ -8002,9 +8058,11 @@ dhd_wl_host_event(dhd_info_t *dhd, int *ifidx, void *pktdata,
 #endif /* CUSTOMER_HW20 && WLANAUDIO */
 
 #ifdef SHOW_LOGTRACE
-	bcmerror = wl_host_event(&dhd->pub, ifidx, pktdata, event, data, &dhd->event_data);
+	bcmerror = wl_host_event(&dhd->pub, ifidx, pktdata, pktlen,
+			event, data, &dhd->event_data);
 #else
-	bcmerror = wl_host_event(&dhd->pub, ifidx, pktdata, event, data, NULL);
+	bcmerror = wl_host_event(&dhd->pub, ifidx, pktdata, pktlen,
+			event, data, NULL);
 #endif /* SHOW_LOGTRACE */
 
 	if (bcmerror != BCME_OK)
@@ -8380,6 +8438,18 @@ dhd_dev_pno_get_for_batch(struct net_device *dev, char *buf, int bufsize)
 	return (dhd_pno_get_for_batch(&dhd->pub, buf, bufsize, PNO_STATUS_NORMAL));
 }
 #endif /* PNO_SUPPORT */
+
+#ifdef GSCAN_SUPPORT
+/* Linux wrapper to call common dhd_pno_get_gscan */
+void *
+dhd_dev_pno_get_gscan(struct net_device *dev, dhd_pno_gscan_cmd_cfg_t type,
+                      void *info, uint32 *len)
+{
+	dhd_info_t *dhd = *(dhd_info_t **)netdev_priv(dev);
+
+	return (dhd_pno_get_gscan(&dhd->pub, type, info, len));
+}
+#endif /* GSCAN_SUPPORT */
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 27))
 static void dhd_hang_process(void *dhd_info, void *event_info, u8 event)
@@ -9679,6 +9749,8 @@ void dhd_schedule_memdump(dhd_pub_t *dhdp, uint8 *buf, uint32 size)
 {
 	dhd_dump_t *dump = NULL;
 	dump = MALLOC(dhdp->osh, sizeof(dhd_dump_t));
+	if (dump == NULL)
+		return;
 	dump->buf = buf;
 	dump->bufsize = size;
 	dhd_deferred_schedule_work(dhdp->info->dhd_deferred_wq, (void *)dump,

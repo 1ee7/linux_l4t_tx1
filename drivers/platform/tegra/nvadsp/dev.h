@@ -36,6 +36,7 @@ enum {
 	AMC,
 	AMISC,
 	ABRIDGE,
+	UNIT_FPGA_RST,
 	APE_MAX_REG
 };
 
@@ -45,12 +46,24 @@ enum {
 	ADSP_MAX_DRAM_MAP
 };
 
+/*
+ * Note: These enums should be aligned to the adsp_mem node mentioned in the
+ * device tree
+*/
 enum adsp_mem_dt {
-	ADSP_LOAD_ADDR,
+	ADSP_OS_ADDR,
 	ADSP_OS_SIZE,
 	ADSP_APP_ADDR,
 	ADSP_APP_SIZE,
+	ARAM_ALIAS_0_ADDR,
+	ARAM_ALIAS_0_SIZE,
 	ADSP_MEM_END,
+};
+
+enum adsp_unit_fpga_reset {
+	ADSP_ASSERT,
+	ADSP_DEASSERT,
+	ADSP_UNIT_FPGA_RESET_END,
 };
 
 
@@ -98,9 +111,9 @@ struct nvadsp_drv_data {
 	struct clk *ape_emc_clk;
 	struct clk *uartape_clk;
 	struct clk *ahub_clk;
-	u32 adsp_freq; /* in KHz*/
-	u32 ape_freq; /* in KHz*/
-	u32 ape_emc_freq; /* in KHz*/
+	unsigned long adsp_freq; /* in KHz*/
+	unsigned long ape_freq; /* in KHz*/
+	unsigned long ape_emc_freq; /* in KHz*/
 
 	struct nvadsp_pm_state state;
 	bool adsp_os_running;
@@ -115,6 +128,8 @@ struct nvadsp_drv_data {
 	bool actmon_initialized;
 #endif
 	u32 adsp_mem[ADSP_MEM_END];
+	bool adsp_unit_fpga;
+	u32 unit_fpga_reset[ADSP_UNIT_FPGA_RESET_END];
 };
 
 #define ADSP_CONFIG	0x04

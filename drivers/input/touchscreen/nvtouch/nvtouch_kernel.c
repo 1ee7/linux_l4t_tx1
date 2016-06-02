@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -12,9 +12,7 @@
  */
 
 #include <linux/module.h>
-#include <linux/slab.h>
 
-#include <linux/vmalloc.h>
 #include <linux/timer.h>
 #include <linux/delay.h>
 
@@ -31,15 +29,15 @@
 #include <linux/platform_device.h>
 #include <linux/backlight.h>
 #include <linux/input/mt.h>
+#include <linux/sysfs.h>
 
 #include "nvtouch_kernel.h"
 
 #define DEVICE_NAME "nvtouch"
 
+#define NVTOUCH_DEBUG 1
+
 #define GPFIFO_SIZE 4
-
-size_t frame_data_size = NVTOUCH_SENSOR_DATA_RESERVED;
-
 
 struct nvtouch_sample_gpfifo {
 	u32 getp;
@@ -70,24 +68,28 @@ struct debugfs_blob_wrapper immediate_data;
 struct debugfs_blob_wrapper captured_data;
 struct debugfs_blob_wrapper unpacked_data;
 
-static void nvtouch_allocate_blobs(struct dentry *dfs_nvtouch_dir,
-		size_t blob_size)
-{
-	frame_data_size = NVTOUCH_SENSOR_DATA_RESERVED + 16;
-	immediate_data.size = frame_data_size;
-	if (!immediate_data.data)
-		immediate_data.data = kmalloc(immediate_data.size, GFP_KERNEL);
-	WARN_ON(!immediate_data.data);
+#define  SENSOR_FRAME_DATA_SIZE (NVTOUCH_SENSOR_DATA_RESERVED + 16)
 
-	unpacked_data.size = frame_data_size;
+u8 s_frame_immediate_data[SENSOR_FRAME_DATA_SIZE];
+
+static void nvtouch_init_blobs(struct dentry *dfs_nvtouch_dir)
+{
+	immediate_data.size = SENSOR_FRAME_DATA_SIZE;
+	immediate_data.data = s_frame_immediate_data;
+
+	unpacked_data.size = SENSOR_FRAME_DATA_SIZE;
 	unpacked_data.data = &g_state_dta.ioctl_dta.data;
 
 #ifdef NVTOUCH_DEBUG
-	dfs_immediate_data = debugfs_create_blob("sim_events_data", S_IRUSR,
-			dfs_nvtouch_dir, &immediate_data);
-	dfs_unpacked_data = debugfs_create_blob("unpacked_data", S_IRUSR,
-			dfs_nvtouch_dir, &unpacked_data);
 	if (!dfs_immediate_data)
+		dfs_immediate_data = debugfs_create_blob(
+			"sim_events_data", S_IRUSR,
+			dfs_nvtouch_dir, &immediate_data);
+	if (!dfs_unpacked_data)
+		dfs_unpacked_data = debugfs_create_blob(
+			"unpacked_data", S_IRUSR,
+			dfs_nvtouch_dir, &unpacked_data);
+	if (!dfs_immediate_data || !dfs_unpacked_data)
 		nv_printf("__TOUCH: debugfs_create_blob error\n");
 #endif
 }
@@ -128,6 +130,12 @@ struct nvtouch_kernel_state {
 	u32 pm_active_to_lp_timeout_ms;
 	u32 pm_active_to_idle_timeout_ms;
 
+	u32 enable_calibration;
+	u32 enable_calibration_debug;
+
+	u32 tune_debug;
+	u32 tune_param;
+
 	struct nvtouch_events vendor_events;
 
 	struct backlight_device *backlight_device;
@@ -147,7 +155,12 @@ struct nvtouch_kernel_state {
 	u64 last_print_timestamp;
 	u32 input_slot_bits;
 	u32 input_slot_ids[NVTOUCH_MT_SLOT_COUNT];
+
+
+	struct device *nvtouch_dev;
 } g_state_kernel;
+
+
 
 /* NvTouch reports touch id 1..127
  * lr388k7 supports 10 slots
@@ -193,8 +206,6 @@ static void init_debug_blink_on_touch(void)
 		EXPOSE_VALUE_U32(g_state_kernel.debug_blink_on_event);
 	}
 }
-
-
 
 struct nvtouch_events *nvtouch_kernel_get_vendor_events_ptr()
 {
@@ -246,6 +257,57 @@ static struct nvtouch_data_frame *nvtouch_gpfifo_get(
 
 static int frames_skipped;
 
+static ssize_t sysfs_driver_mode_show(struct device *dev,
+	struct device_attribute *attr,
+	char *buf)
+{
+	return sprintf(buf, "%d\n",
+			g_state_kernel.driver_mode);
+}
+
+static ssize_t sysfs_driver_mode_set(struct device *dev,
+	struct device_attribute *attr,
+	const char *buf, size_t count)
+{
+	ssize_t ret;
+
+	if (count < 2)
+		return -EINVAL;
+
+	ret = (ssize_t) count;
+
+	if (count == 2) {
+		switch (buf[0]) {
+		case '0':
+			g_state_kernel.driver_mode = 0;
+			break;
+		case '1':
+			g_state_kernel.driver_mode = 1;
+			break;
+		case '2':
+			g_state_kernel.driver_mode = 2;
+			break;
+		case '3':
+			g_state_kernel.driver_mode = 3;
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	/* send last data frame to userspace to notify about
+	 * driver mode changes */
+	if (g_state_kernel.is_initialized &&
+		nvtouch_gpfifo_empty(&g_state_kernel.sample_gpfifo)) {
+		g_state_kernel.sample_gpfifo.getp--;
+		wake_up(&g_state_kernel.sample_gpfifo.data_waitqueue);
+	}
+	return ret;
+}
+
+static DEVICE_ATTR(driver_mode, 0664, sysfs_driver_mode_show,
+		sysfs_driver_mode_set);
+
 /*
  * Timestamp the samples and pass them to further processing
  */
@@ -296,8 +358,11 @@ void nvtouch_kernel_process(void *samples, int samples_size, u8 report_mode)
 		data_frame->frame_counter = g_state_kernel.frame_counter++;
 		memcpy(data_frame->samples, samples, samples_size);
 		g_state_kernel.sample_gpfifo.putp++;
-		/* Wake up touch recognition engine to process new data frame */
-		wake_up(&g_state_kernel.sample_gpfifo.data_waitqueue);
+		if (g_state_kernel.is_initialized) {
+			/* Wake up touch recognition engine to
+			process new data frame */
+			wake_up(&g_state_kernel.sample_gpfifo.data_waitqueue);
+		}
 	} else {
 		if (!(frames_skipped & 0xff))
 			pr_err(
@@ -313,14 +378,14 @@ EXPORT_SYMBOL(nvtouch_kernel_process);
 static int device_open(struct inode *inode,
 	struct file *file)
 {
-	pr_info("device_open(%p)\n", file);
+	pr_info("nvtouch device_open(%p)\n", file);
 	return 0;
 }
 
 static int device_release(struct inode *inode,
 	struct file *file)
 {
-	pr_info("device_release(%p,%p)\n", inode, file);
+	pr_info("nvtouch device_release(%p,%p)\n", inode, file);
 	return 0;
 }
 
@@ -376,6 +441,7 @@ int nvtouch_ioctl_do_update(struct file *filp, unsigned int cmd,
 	struct nvtouch_data_frame *data_frame;
 	struct nvtouch_ioctl_data *params;
 	int wait_count;
+	u32 in_tune_param;
 
 	if (copy_from_user(&g_state_kernel.ioctl_data_update,
 			(void __user *)arg, _IOC_SIZE(cmd))) {
@@ -398,7 +464,8 @@ int nvtouch_ioctl_do_update(struct file *filp, unsigned int cmd,
 
 	params = &g_state_kernel.ioctl_data_update;
 
-	if ((g_state_kernel.sample_gpfifo.getp & 1023) == 0) {
+	if (g_state_kernel.enable_debug_log &&
+			(g_state_kernel.sample_gpfifo.getp & 1023) == 0) {
 		pr_err("NVTOUCH_IOCTL_UPDATE %d\n",
 			(int)g_state_kernel.sample_gpfifo.getp);
 	}
@@ -442,7 +509,8 @@ int nvtouch_ioctl_do_update(struct file *filp, unsigned int cmd,
 			 * fail-safe to release userspace zombie
 			 * process
 			 * */
-			pr_err("NVTOUCH: ioctl IO failed, retrying\n");
+			if (g_state_kernel.enable_debug_log)
+				pr_err("NVTOUCH ioctl: -EAGAIN\n");
 			return -EAGAIN;
 		}
 	}
@@ -457,6 +525,10 @@ int nvtouch_ioctl_do_update(struct file *filp, unsigned int cmd,
 
 	g_state_kernel.sample_gpfifo.getp++;
 
+	in_tune_param = (params->driver_config &
+			NVTOUCH_CONFIG_TUNE_PARAM_MASK) >>
+			NVTOUCH_CONFIG_TUNE_PARAM_SHIFT;
+
 	/* copy debugfs params */
 	params->trace_mode = g_state_kernel.trace_mode;
 	params->driver_config = g_state_kernel.driver_mode;
@@ -468,9 +540,38 @@ int nvtouch_ioctl_do_update(struct file *filp, unsigned int cmd,
 		params->driver_config &=
 			~NVTOUCH_CONFIG_ENABLE_DTA;
 
+	if (g_state_kernel.enable_calibration)
+		params->driver_config |=
+			NVTOUCH_CONFIG_ENABLE_CALIBRATION;
+	else
+		params->driver_config &=
+			~NVTOUCH_CONFIG_ENABLE_CALIBRATION;
+
+	if (g_state_kernel.tune_debug)
+		params->driver_config |=
+			NVTOUCH_CONFIG_TUNE_DEBUG;
+	else
+		params->driver_config &=
+			~NVTOUCH_CONFIG_TUNE_DEBUG;
+
+	if (g_state_kernel.enable_calibration_debug)
+		params->driver_config |=
+			NVTOUCH_CONFIG_ENABLE_CALIBRATION_DEBUG;
+	else
+		params->driver_config &=
+			~NVTOUCH_CONFIG_ENABLE_CALIBRATION_DEBUG;
+
 	params->driver_config |= (g_state_kernel.report_mode <<
 			NVTOUCH_CONFIG_REPORT_MODE_SHIFT) &
 			NVTOUCH_CONFIG_REPORT_MODE_MASK;
+
+	if (g_state_kernel.tune_debug) {
+		params->driver_config |= (g_state_kernel.tune_param <<
+				NVTOUCH_CONFIG_TUNE_PARAM_SHIFT) &
+				NVTOUCH_CONFIG_TUNE_PARAM_MASK;
+	} else {
+		g_state_kernel.tune_param = in_tune_param;
+	}
 
 	return copy_to_user((void __user *)arg,
 			params, _IOC_SIZE(cmd));
@@ -673,7 +774,8 @@ void nvtouch_report_events(struct nvtouch_events *touch_events)
 				fps = 1000000 / fps;
 			}
 #ifdef NVTOUCH_DEBUG
-			pr_err(
+			if (g_state_kernel.enable_debug_log)
+				pr_err(
 			"Average processing time = %d us, avg fps = %d\n",
 				g_state_kernel.update_time_acc /
 					g_state_kernel.update_count, fps);
@@ -764,9 +866,8 @@ EXPORT_SYMBOL(nvtouch_get_time_us);
 void nvtouch_kernel_init(int sensor_w, int sensor_h, int screen_w,
 		int screen_h, int invert_x, int invert_y,
 		struct input_dev *input_device) {
-	int i;
+
 	g_state_kernel.input_device = input_device;
-	g_state_kernel.debug_dfs = debugfs_create_dir("nvtouch", NULL);
 
 	__set_bit(BTN_TOOL_RUBBER, input_device->keybit);
 	input_set_abs_params(input_device, ABS_MT_TOOL_TYPE, 0,
@@ -778,59 +879,15 @@ void nvtouch_kernel_init(int sensor_w, int sensor_h, int screen_w,
 	g_state_kernel.userspace_config.screen_h = screen_h;
 	g_state_kernel.userspace_config.invert_x = invert_x;
 	g_state_kernel.userspace_config.invert_y = invert_y;
-	g_state_kernel.userspace_config.driver_version_kernel =
-			NVTOUCH_DRIVER_VERSION;
 
-	g_state_dta.authorized_pid = NVTOUCH_DTA_ADMIN_NULL_PID;
-	g_state_dta.client_refcount = 0;
-	g_state_dta.send_debug_touch = 0;
-
-	g_state_kernel.time_of_last_touch = nvtouch_get_time_us();
-	g_state_kernel.input_slot_bits = 0;
-
-	init_waitqueue_head(&g_state_kernel.sample_gpfifo.data_waitqueue);
-
-	EXPOSE_VALUE_U32(g_state_kernel.driver_mode);
-	g_state_kernel.driver_mode = NVTOUCH_DRIVER_CONFIG_MODE_VENDOR_DTA;
-
-	g_state_kernel.dual_mode_enable_nvtouch_events = 1;
-	g_state_kernel.dual_mode_enable_vendor_events = 1;
-
-#ifdef NVTOUCH_DEBUG
-	EXPOSE_VALUE_U32(g_state_kernel.enable_debug_log);
-	EXPOSE_VALUE_U32(g_state_kernel.trace_mode);
-
-	EXPOSE_VALUE_U32(g_state_kernel.dual_mode_vendor_delta_x);
-	EXPOSE_VALUE_U32(g_state_kernel.dual_mode_vendor_delta_y);
-	EXPOSE_VALUE_U32(g_state_kernel.dual_mode_nvtouch_delta_x);
-	EXPOSE_VALUE_U32(g_state_kernel.dual_mode_nvtouch_delta_y);
-
-	EXPOSE_VALUE_U32(g_state_kernel.dual_mode_enable_nvtouch_events);
-	EXPOSE_VALUE_U32(g_state_kernel.dual_mode_enable_vendor_events);
-	EXPOSE_VALUE_U32(g_state_kernel.pm_active_to_lp_timeout_ms);
-	EXPOSE_VALUE_U32(g_state_kernel.pm_active_to_idle_timeout_ms);
-#endif
-	g_state_kernel.pm_active_to_lp_timeout_ms = 3000;
-	g_state_kernel.pm_active_to_idle_timeout_ms = 20;
-
-
-	nvtouch_allocate_blobs(g_state_kernel.debug_dfs,
-			NVTOUCH_SENSOR_DATA_RESERVED);
-
-	init_debug_blink_on_touch();
-
-	spin_lock_init(&g_state_dta.slock);
-
-	for (i = 0; i < NVTOUCH_MT_SLOT_COUNT; i++)
-		clear_mt_slot(i);
-
+	wmb();
 	g_state_kernel.is_initialized = 1;
 }
 EXPORT_SYMBOL(nvtouch_kernel_init);
 
 void nvtouch_debug_expose_u32(const char *name, u32 *var)
 {
-	debugfs_create_u32(name, S_IWUGO | S_IRUGO,
+	debugfs_create_u32(name, 0600,
 			g_state_kernel.debug_dfs, var);
 }
 
@@ -1155,6 +1212,7 @@ dev_t *nv_dev_first;
 static int __init nvtouch_cdev_init(void)
 {
 	int err = 0;
+	int i;
 
 	if (register_chrdev(NVTOUCH_MAJOR, "nvtouch", &fops)) {
 		pr_err("Nvtouch driver: Unable to register driver\n");
@@ -1166,8 +1224,74 @@ static int __init nvtouch_cdev_init(void)
 		goto out_chrdev;
 	}
 
-	device_create(nvtouch_cdev_class, NULL,
-	MKDEV(NVTOUCH_MAJOR, 0), NULL, "nvtouch");
+	g_state_kernel.nvtouch_dev =
+			device_create(nvtouch_cdev_class, NULL,
+			MKDEV(NVTOUCH_MAJOR, 0), NULL, "nvtouch");
+
+	if (!g_state_kernel.nvtouch_dev) {
+		class_destroy(nvtouch_cdev_class);
+		err = -ENODEV;
+		goto out_chrdev;
+	}
+
+	if (sysfs_create_file(&g_state_kernel.nvtouch_dev->kobj,
+				&dev_attr_driver_mode.attr)) {
+			WARN_ON("No sysfs attributes exposed for NvTouch!\n");
+	}
+
+	g_state_kernel.userspace_config.driver_version_kernel =
+			NVTOUCH_DRIVER_VERSION;
+
+	g_state_dta.authorized_pid = NVTOUCH_DTA_ADMIN_NULL_PID;
+	g_state_dta.client_refcount = 0;
+	g_state_dta.send_debug_touch = 0;
+
+	g_state_kernel.time_of_last_touch = nvtouch_get_time_us();
+	g_state_kernel.input_slot_bits = 0;
+
+	g_state_kernel.driver_mode = NVTOUCH_DRIVER_CONFIG_MODE_VENDOR_ONLY;
+
+	g_state_kernel.dual_mode_enable_nvtouch_events = 1;
+	g_state_kernel.dual_mode_enable_vendor_events = 1;
+
+	g_state_kernel.enable_calibration = 1;
+	g_state_kernel.enable_calibration_debug = 1;
+
+	g_state_kernel.tune_debug = 0;
+	g_state_kernel.tune_param = 119;
+
+#ifdef NVTOUCH_DEBUG
+	g_state_kernel.debug_dfs = debugfs_create_dir("nvtouch", NULL);
+
+	EXPOSE_VALUE_U32(g_state_kernel.enable_debug_log);
+	EXPOSE_VALUE_U32(g_state_kernel.trace_mode);
+
+	EXPOSE_VALUE_U32(g_state_kernel.dual_mode_vendor_delta_x);
+	EXPOSE_VALUE_U32(g_state_kernel.dual_mode_vendor_delta_y);
+	EXPOSE_VALUE_U32(g_state_kernel.dual_mode_nvtouch_delta_x);
+	EXPOSE_VALUE_U32(g_state_kernel.dual_mode_nvtouch_delta_y);
+
+	EXPOSE_VALUE_U32(g_state_kernel.dual_mode_enable_nvtouch_events);
+	EXPOSE_VALUE_U32(g_state_kernel.dual_mode_enable_vendor_events);
+	EXPOSE_VALUE_U32(g_state_kernel.pm_active_to_lp_timeout_ms);
+	EXPOSE_VALUE_U32(g_state_kernel.pm_active_to_idle_timeout_ms);
+
+	EXPOSE_VALUE_U32(g_state_kernel.enable_calibration);
+	EXPOSE_VALUE_U32(g_state_kernel.enable_calibration_debug);
+
+	EXPOSE_VALUE_U32(g_state_kernel.tune_debug);
+	EXPOSE_VALUE_U32(g_state_kernel.tune_param);
+#endif
+	g_state_kernel.pm_active_to_lp_timeout_ms = 3000;
+	g_state_kernel.pm_active_to_idle_timeout_ms = 20;
+
+	for (i = 0; i < NVTOUCH_MT_SLOT_COUNT; i++)
+		clear_mt_slot(i);
+
+	init_waitqueue_head(&g_state_kernel.sample_gpfifo.data_waitqueue);
+	init_debug_blink_on_touch();
+	nvtouch_init_blobs(g_state_kernel.debug_dfs);
+	spin_lock_init(&g_state_dta.slock);
 
 	create_dta_dev_nodes();
 
@@ -1184,7 +1308,7 @@ out:
  /* Cleanup - unregister the appropriate file from /proc */
 static void cleanup_devnode(void)
 {
-   /* Unregister the device */
+	/* Unregister the device */
 	unregister_chrdev(MAJOR_NUM, DEVICE_NAME);
 	unregister_dta_dev_nodes();
 }

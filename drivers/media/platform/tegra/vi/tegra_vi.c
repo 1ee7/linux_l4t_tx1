@@ -22,11 +22,10 @@
 #include <linux/nvhost_vi_ioctl.h>
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
-
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include <mach/clk.h>
-#include <mach/latency_allowance.h>
+#include <linux/platform/tegra/latency_allowance.h>
 
 #include "bus_client.h"
 #include "nvhost_acm.h"
@@ -102,7 +101,6 @@ int nvhost_vi_finalize_poweron(struct platform_device *dev)
 	}
 #endif
 
-
 	ret = vi_enable_irq(tegra_vi);
 	if (ret)
 		dev_err(&tegra_vi->ndev->dev, "%s: vi_enable_irq failed\n",
@@ -147,7 +145,6 @@ static int vi_isomgr_register(struct vi *tegra_vi)
 {
 	int iso_client_id = TEGRA_ISO_CLIENT_VI_0;
 	struct clk *vi_clk;
-	unsigned long max_bw = 0;
 	struct nvhost_device_data *pdata =
 				platform_get_drvdata(tegra_vi->ndev);
 
@@ -156,16 +153,14 @@ static int vi_isomgr_register(struct vi *tegra_vi)
 	if (WARN_ONCE(pdata == NULL, "pdata not found, %s failed\n", __func__))
 		return -ENODEV;
 
-	if (tegra_vi->ndev->id)
-		iso_client_id = TEGRA_ISO_CLIENT_VI_1;
-
 	/* Get max VI BW */
 	vi_clk = pdata->clk[0];
-	max_bw = (clk_round_rate(vi_clk, UINT_MAX) / 1000) * VI_MAX_BPP;
+	tegra_vi->max_bw =
+			(clk_round_rate(vi_clk, UINT_MAX) / 1000) * VI_MAX_BPP;
 
 	/* Register with max possible BW in VI usecases.*/
 	tegra_vi->isomgr_handle = tegra_isomgr_register(iso_client_id,
-					max_bw,
+					tegra_vi->max_bw,
 					NULL,	/* tegra_isomgr_renegotiate */
 					NULL);	/* *priv */
 
@@ -227,56 +222,16 @@ static int vi_isomgr_release(struct vi *tegra_vi)
 }
 #endif
 
-static int vi_set_la(struct vi *tegra_vi1, uint vi_bw)
+static int vi_set_la(u32 vi_bw)
 {
-	struct nvhost_device_data *pdata_vi1, *pdata_vi2;
-	struct vi *tegra_vi2;
-	struct clk *clk_vi;
 	int ret = 0;
-	uint total_vi_bw;
-
-	pdata_vi1 =
-		(struct nvhost_device_data *)tegra_vi1->ndev->dev.platform_data;
-
-	if (!pdata_vi1)
-		return -ENODEV;
-
-	/* Copy device data for other vi device */
-	mutex_lock(&la_lock);
-
-	tegra_vi1->vi_bw = vi_bw / 1000;
-	total_vi_bw = tegra_vi1->vi_bw;
-	if (pdata_vi1->master)
-		pdata_vi2 = (struct nvhost_device_data *)
-			pdata_vi1->master->dev.platform_data;
-	else
-		pdata_vi2 = (struct nvhost_device_data *)
-			pdata_vi1->slave->dev.platform_data;
-
-	if (!pdata_vi2) {
-		mutex_unlock(&la_lock);
-		return -ENODEV;
-	}
-
-	tegra_vi2 = (struct vi *)pdata_vi2->private_data;
-
-	if (!tegra_vi2) {
-		mutex_unlock(&la_lock);
-		return -ENODATA;
-	}
-
-	clk_vi = clk_get(&tegra_vi2->ndev->dev, "emc");
-	if (tegra_is_clk_enabled(clk_vi))
-		total_vi_bw += tegra_vi2->vi_bw;
-
-	mutex_unlock(&la_lock);
 
 #ifdef CONFIG_TEGRA_MC
-	ret = tegra_set_camera_ptsa(TEGRA_LA_VI_W, total_vi_bw, 1);
+	ret = tegra_set_camera_ptsa(TEGRA_LA_VI_W, vi_bw, 1);
 
 	if (!ret) {
 		ret = tegra_set_latency_allowance(TEGRA_LA_VI_W,
-			total_vi_bw);
+			vi_bw);
 
 		if (ret)
 			pr_err("%s: set latency failed: %d\n",
@@ -324,6 +279,52 @@ static long vi_ioctl(struct file *file,
 
 		return ret;
 	}
+	case _IOC_NR(NVHOST_VI_IOCTL_GET_VI_CLK): {
+		int ret;
+		u64 vi_clk_rate = 0;
+
+		ret = nvhost_module_get_rate(tegra_vi->ndev,
+			(unsigned long *)&vi_clk_rate, 0);
+		if (ret) {
+			dev_err(&tegra_vi->ndev->dev,
+			"%s: failed to get vi clk\n",
+			__func__);
+			return ret;
+		}
+
+		if (copy_to_user((void __user *)arg,
+			&vi_clk_rate, sizeof(vi_clk_rate))) {
+			dev_err(&tegra_vi->ndev->dev,
+			"%s:Failed to copy vi clk rate to user\n",
+			__func__);
+			return -EFAULT;
+		}
+
+		return 0;
+	}
+	case _IOC_NR(NVHOST_VI_IOCTL_SET_VI_LA_BW): {
+		u32 ret = 0;
+		u32 vi_la_bw;
+
+		if (copy_from_user(&vi_la_bw,
+			(const void __user *)arg,
+				sizeof(vi_la_bw))) {
+			dev_err(&tegra_vi->ndev->dev,
+				"%s: Failed to copy arg from user\n", __func__);
+			return -EFAULT;
+			}
+
+		/* Set latency allowance for VI, BW is in MBps */
+		ret = vi_set_la(vi_la_bw);
+		if (ret) {
+			dev_err(&tegra_vi->ndev->dev,
+			"%s: failed to set la vi_bw %u MBps\n",
+			__func__, vi_la_bw);
+			return -ENOMEM;
+		}
+
+		return 0;
+	}
 	case _IOC_NR(NVHOST_VI_IOCTL_SET_EMC_INFO): {
 		uint vi_bw;
 		int ret;
@@ -334,7 +335,7 @@ static long vi_ioctl(struct file *file,
 			return -EFAULT;
 		}
 
-		ret = vi_set_la(tegra_vi, vi_bw);
+		ret = vi_set_la(vi_bw/1000);
 		if (ret) {
 			dev_err(&tegra_vi->ndev->dev,
 			"%s: failed to set la for vi_bw %u MBps\n",
@@ -354,6 +355,14 @@ static long vi_ioctl(struct file *file,
 				__func__);
 				return -ENOMEM;
 			}
+		}
+
+		if (vi_bw > tegra_vi->max_bw) {
+			dev_err(&tegra_vi->ndev->dev,
+			"%s: Requested ISO BW %u is more than "
+			"VI's max BW %u possible\n",
+			__func__, vi_bw, tegra_vi->max_bw);
+			return -EINVAL;
 		}
 
 		/*
@@ -516,42 +525,4 @@ void nvhost_vi_reset_all(struct platform_device *pdev)
 		writel(0, reset_reg[2]);
 		writel(0, reset_reg[1]);
 	}
-}
-
-void nvhost_vi_reset(struct platform_device *pdev)
-{
-	void __iomem *reset_reg[4];
-	int i;
-	struct nvhost_device_data *pdata = pdev->dev.platform_data;
-
-	if (pdev->id == 0) {
-		reset_reg[0] = pdata->aperture[0] +
-			       T12_VI_CSI_0_SW_RESET;
-		reset_reg[1] = pdata->aperture[0] +
-			       T12_CSI_CSI_SW_SENSOR_A_RESET;
-		reset_reg[2] = pdata->aperture[0] +
-			       T12_CSI_CSICIL_SW_SENSOR_A_RESET;
-		reset_reg[3] = pdata->aperture[0] +
-			       T12_VI_CSI_0_CSI_IMAGE_DT;
-	} else {
-		pdata = pdata->master->dev.platform_data;
-		reset_reg[0] = pdata->aperture[0] +
-			       T12_VI_CSI_1_SW_RESET;
-		reset_reg[1] = pdata->aperture[0] +
-			       T12_CSI_CSI_SW_SENSOR_B_RESET;
-		reset_reg[2] = pdata->aperture[0] +
-			       T12_CSI_CSICIL_SW_SENSOR_B_RESET;
-		reset_reg[3] = pdata->aperture[0] +
-			       T12_VI_CSI_1_CSI_IMAGE_DT;
-	}
-
-	writel(0, reset_reg[3]);
-	writel(0x1, reset_reg[2]);
-	writel(0x1, reset_reg[1]);
-	writel(0x1f, reset_reg[0]);
-
-	udelay(10);
-
-	for (i = 2; i > 0; i--)
-		writel(0, reset_reg[i]);
 }

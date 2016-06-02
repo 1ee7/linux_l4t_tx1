@@ -2,7 +2,7 @@
  * battery-charger-gauge-comm.c -- Communication between battery charger and
  *	battery gauge driver.
  *
- * Copyright (c) 2013-2014, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2013-2015, NVIDIA CORPORATION.  All rights reserved.
  *
  * Author: Laxman Dewangan <ldewangan@nvidia.com>
  *

@@ -24,6 +24,16 @@
 #define NON_STD_CHARGER_DET_TIME_MS 1000
 #define USB_ANDROID_SUSPEND_CURRENT_MA 2
 
+/* VENDOR ID */
+#define XUDC_VENDOR_ID		0x10de
+
+/* DEVICE ID */
+#define XUDC_DEVICE_ID_T210	0x0fad
+#define XUDC_DEVICE_ID_T186	0x10e2
+
+#define XUDC_IS_T210(t)	(t->device_id == XUDC_DEVICE_ID_T210)
+#define XUDC_IS_T186(t)	(t->device_id == XUDC_DEVICE_ID_T186)
+
 /*
  * Register definitions
  */
@@ -514,6 +524,7 @@ struct nv_udc_request {
 	struct transfer_trb_s *last_trb;
 	bool all_trbs_queued;
 	bool short_pkt;
+	bool need_zlp;	/* only used by ctrl ep */
 };
 
 struct nv_setup_packet {
@@ -606,6 +617,8 @@ struct nv_udc_s {
 	bool binded;
 	bool pullup;
 	bool is_elpg;
+	bool is_suspended;
+	bool extcon_event_processing;
 	bool elpg_is_processing;
 	u32 act_bulk_ep;
 	u32 num_enabled_eps;
@@ -917,5 +930,3 @@ extern int debug_level;
 
 #define XUSB_VBUS				(0xc60)
 
-#define XUSB_DEVICE_ID_T210			0x0FAD
-#define XUSB_IS_T210(t)	(t->device_id == XUSB_DEVICE_ID_T210)

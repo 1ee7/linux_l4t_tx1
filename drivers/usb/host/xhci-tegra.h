@@ -31,6 +31,10 @@
 
 #include <mach/xusb.h>
 
+#ifdef CONFIG_NV_GAMEPAD_RESET
+extern void gamepad_reset_war(void);
+#endif
+
 #ifdef CONFIG_USB_OTG_WAKELOCK
 extern void otgwl_acquire_temp_lock(void);
 #endif
@@ -377,7 +381,8 @@ struct tegra_xhci_hcd {
 
 	bool otg_port_owned;
 	bool otg_port_ownership_changed;
-	u32  otg_portnum;
+	u32  hs_otg_portnum;
+	u32  ss_otg_portnum;
 
 	struct regulator **xusb_utmi_vbus_regs;
 
@@ -445,7 +450,6 @@ struct tegra_xhci_hcd {
 	unsigned long cpufreq_last_boosted;
 	bool cpufreq_boosted;
 	bool restore_cpufreq_scheduled;
-	unsigned int boost_cpu_freq;
 	unsigned int boost_cpu_trigger;
 #endif
 	bool init_done;

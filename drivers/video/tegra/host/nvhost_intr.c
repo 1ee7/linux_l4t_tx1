@@ -3,7 +3,7 @@
  *
  * Tegra Graphics Host Interrupt Management
  *
- * Copyright (c) 2010-2015, NVIDIA CORPORATION. All rights reserved.
+ * Copyright (c) 2010-2016, NVIDIA CORPORATION. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -36,17 +36,6 @@
 #include "chip_support.h"
 
 /*** Wait list management ***/
-
-struct nvhost_waitlist {
-	struct list_head list;
-	struct kref refcount;
-	u32 thresh;
-	enum nvhost_intr_action action;
-	atomic_t state;
-	struct timespec isr_recv;
-	void *data;
-	int count;
-};
 
 struct nvhost_waitlist_external_notifier {
 	struct nvhost_master *master;
@@ -188,7 +177,7 @@ static void action_submit_complete(struct nvhost_waitlist *waiter)
 
 static void action_wakeup(struct nvhost_waitlist *waiter)
 {
-	wait_queue_head_t *wq = waiter->data;
+	wait_queue_head_t *wq = &waiter->wq;
 
 	WARN_ON(atomic_xchg(&waiter->state, WLS_HANDLED) != WLS_REMOVED);
 	wake_up(wq);
@@ -208,7 +197,7 @@ static void action_notify(struct nvhost_waitlist *waiter)
 
 static void action_wakeup_interruptible(struct nvhost_waitlist *waiter)
 {
-	wait_queue_head_t *wq = waiter->data;
+	wait_queue_head_t *wq = &waiter->wq;
 
 	WARN_ON(atomic_xchg(&waiter->state, WLS_HANDLED) != WLS_REMOVED);
 	wake_up_interruptible(wq);
@@ -229,6 +218,7 @@ static action_handler action_handlers[NVHOST_INTR_ACTION_COUNT] = {
 	action_signal_sync_pt,
 	action_wakeup,
 	action_wakeup_interruptible,
+	action_notify,
 	action_submit_complete,
 	action_notify,
 };
@@ -414,6 +404,7 @@ int nvhost_intr_add_action(struct nvhost_intr *intr, u32 id, u32 thresh,
 
 	/* initialize a new waiter */
 	INIT_LIST_HEAD(&waiter->list);
+	init_waitqueue_head(&waiter->wq);
 	kref_init(&waiter->refcount);
 	if (ref)
 		kref_get(&waiter->refcount);
@@ -451,8 +442,9 @@ void *nvhost_intr_alloc_waiter(void)
 			GFP_KERNEL|__GFP_REPEAT);
 }
 
-int nvhost_intr_register_notifier(struct platform_device *pdev,
+static int __nvhost_intr_register_notifier(struct platform_device *pdev,
 				  u32 id, u32 thresh,
+				  enum nvhost_intr_action action,
 				  void (*callback)(void *, int),
 				  void *private_data)
 {
@@ -486,7 +478,7 @@ int nvhost_intr_register_notifier(struct platform_device *pdev,
 
 	err = nvhost_intr_add_action(&master->intr,
 				     id, thresh,
-				     NVHOST_INTR_ACTION_NOTIFY,
+				     action,
 				     notifier,
 				     waiter,
 				     NULL);
@@ -500,7 +492,28 @@ err_alloc_notifier:
 err_alloc_waiter:
 	return err;
 }
+
+int nvhost_intr_register_notifier(struct platform_device *pdev,
+				  u32 id, u32 thresh,
+				  void (*callback)(void *, int),
+				  void *private_data)
+{
+	return __nvhost_intr_register_notifier(pdev, id, thresh,
+				  NVHOST_INTR_ACTION_NOTIFY,
+				  callback, private_data);
+}
 EXPORT_SYMBOL(nvhost_intr_register_notifier);
+
+int nvhost_intr_register_fast_notifier(struct platform_device *pdev,
+				  u32 id, u32 thresh,
+				  void (*callback)(void *, int),
+				  void *private_data)
+{
+	return __nvhost_intr_register_notifier(pdev, id, thresh,
+				  NVHOST_INTR_ACTION_FAST_NOTIFY,
+				  callback, private_data);
+}
+EXPORT_SYMBOL(nvhost_intr_register_fast_notifier);
 
 void nvhost_intr_put_ref(struct nvhost_intr *intr, u32 id, void *ref)
 {
@@ -531,7 +544,6 @@ int nvhost_intr_init(struct nvhost_intr *intr, u32 irq_gen, u32 irq_sync)
 
 	mutex_init(&intr->mutex);
 	intr->syncpt_irq = irq_sync;
-	intr->wq = alloc_workqueue("host_syncpt", WQ_MEM_RECLAIM | WQ_HIGHPRI, 4);
 	intr->general_irq = irq_gen;
 
 	for (id = 0, syncpt = intr->syncpt;
@@ -556,7 +568,6 @@ int nvhost_intr_init(struct nvhost_intr *intr, u32 irq_gen, u32 irq_sync)
 void nvhost_intr_deinit(struct nvhost_intr *intr)
 {
 	nvhost_intr_stop(intr);
-	destroy_workqueue(intr->wq);
 }
 
 void nvhost_intr_start(struct nvhost_intr *intr, u32 hz)

@@ -113,6 +113,9 @@ static int gk20a_channel_syncpt_wait_fd(struct gk20a_channel_sync *s, int fd,
 	}
 
 	num_wait_cmds = nvhost_sync_num_pts(sync_fence);
+	if (num_wait_cmds == 0)
+		return 0;
+
 	gk20a_channel_alloc_priv_cmdbuf(c, 4 * num_wait_cmds, &wait_cmd);
 	if (wait_cmd == NULL) {
 		gk20a_err(dev_from_gk20a(c->g),
@@ -292,12 +295,19 @@ static void gk20a_channel_syncpt_signal_timeline(
 	/* Nothing to do. */
 }
 
+static int gk20a_channel_syncpt_id(struct gk20a_channel_sync *s)
+{
+	struct gk20a_channel_syncpt *sp =
+		container_of(s, struct gk20a_channel_syncpt, ops);
+	return sp->id;
+}
+
 static void gk20a_channel_syncpt_destroy(struct gk20a_channel_sync *s)
 {
 	struct gk20a_channel_syncpt *sp =
 		container_of(s, struct gk20a_channel_syncpt, ops);
 	nvhost_syncpt_set_min_eq_max_ext(sp->host1x_pdev, sp->id);
-	nvhost_free_syncpt(sp->id);
+	nvhost_syncpt_put_ref_ext(sp->host1x_pdev, sp->id);
 	kfree(sp);
 }
 
@@ -305,6 +315,7 @@ static struct gk20a_channel_sync *
 gk20a_channel_syncpt_create(struct channel_gk20a *c)
 {
 	struct gk20a_channel_syncpt *sp;
+	char syncpt_name[32];
 
 	sp = kzalloc(sizeof(*sp), GFP_KERNEL);
 	if (!sp)
@@ -312,13 +323,19 @@ gk20a_channel_syncpt_create(struct channel_gk20a *c)
 
 	sp->c = c;
 	sp->host1x_pdev = c->g->host1x_dev;
-	sp->id = nvhost_get_syncpt_host_managed(c->g->dev, c->hw_chid);
-	nvhost_syncpt_set_min_eq_max_ext(sp->host1x_pdev, sp->id);
+
+	snprintf(syncpt_name, sizeof(syncpt_name),
+		"%s_%d", dev_name(&c->g->dev->dev), c->hw_chid);
+
+	sp->id = nvhost_get_syncpt_host_managed(sp->host1x_pdev,
+						c->hw_chid, syncpt_name);
 	if (!sp->id) {
 		kfree(sp);
 		gk20a_err(&c->g->dev->dev, "failed to get free syncpt");
 		return NULL;
 	}
+
+	nvhost_syncpt_set_min_eq_max_ext(sp->host1x_pdev, sp->id);
 
 	sp->ops.wait_syncpt		= gk20a_channel_syncpt_wait_syncpt;
 	sp->ops.wait_fd			= gk20a_channel_syncpt_wait_fd;
@@ -327,6 +344,7 @@ gk20a_channel_syncpt_create(struct channel_gk20a *c)
 	sp->ops.incr_user		= gk20a_channel_syncpt_incr_user;
 	sp->ops.set_min_eq_max		= gk20a_channel_syncpt_set_min_eq_max;
 	sp->ops.signal_timeline		= gk20a_channel_syncpt_signal_timeline;
+	sp->ops.syncpt_id		= gk20a_channel_syncpt_id;
 	sp->ops.destroy			= gk20a_channel_syncpt_destroy;
 
 	return &sp->ops;
@@ -609,6 +627,11 @@ static void gk20a_channel_semaphore_signal_timeline(
 	gk20a_sync_timeline_signal(sp->timeline);
 }
 
+static int gk20a_channel_semaphore_syncpt_id(struct gk20a_channel_sync *s)
+{
+	return -EINVAL;
+}
+
 static void gk20a_channel_semaphore_destroy(struct gk20a_channel_sync *s)
 {
 	struct gk20a_channel_semaphore *sema =
@@ -667,6 +690,7 @@ gk20a_channel_semaphore_create(struct channel_gk20a *c)
 	sema->ops.incr_user	= gk20a_channel_semaphore_incr_user;
 	sema->ops.set_min_eq_max = gk20a_channel_semaphore_set_min_eq_max;
 	sema->ops.signal_timeline = gk20a_channel_semaphore_signal_timeline;
+	sema->ops.syncpt_id	= gk20a_channel_semaphore_syncpt_id;
 	sema->ops.destroy	= gk20a_channel_semaphore_destroy;
 
 	return &sema->ops;
